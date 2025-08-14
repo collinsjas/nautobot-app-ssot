@@ -225,9 +225,27 @@ class NautobotDeviceRole(DeviceRole):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create DeviceRole object in Nautobot."""
-        _devicerole = Role.objects.create(name=ids["name"], description=attrs["description"])
-        _devicerole.content_types.add(ContentType.objects.get_for_model(OrmDevice))
-        _devicerole.validated_save()
+        # Use get_or_create to handle existing roles
+        _devicerole, created = Role.objects.get_or_create(
+            name=ids["name"],
+            defaults={"description": attrs["description"]}
+        )
+        
+        if created:
+            adapter.job.logger.info(f"Created new device role: {ids['name']}")
+        else:
+            adapter.job.logger.info(f"Using existing device role: {ids['name']}")
+            # Update description if the role already exists
+            if attrs.get("description") and _devicerole.description != attrs["description"]:
+                _devicerole.description = attrs["description"]
+                _devicerole.validated_save()
+        
+        # Ensure this role can be applied to devices
+        device_content_type = ContentType.objects.get_for_model(OrmDevice)
+        if device_content_type not in _devicerole.content_types.all():
+            _devicerole.content_types.add(device_content_type)
+            _devicerole.validated_save()
+        
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
     def update(self, attrs):
@@ -289,13 +307,25 @@ class NautobotDevice(Device):
                 site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
                 location.tags.add(site_tag)
         
+        # Get or create controller managed device group if specified
+        controller_group = None
+        if attrs.get("controller_group"):
+            try:
+                controller_group = ControllerManagedDeviceGroup.objects.get(name=attrs["controller_group"])
+            except ControllerManagedDeviceGroup.DoesNotExist:
+                adapter.job.logger.info(f"Creating missing controller group: {attrs['controller_group']}")
+                controller_group = ControllerManagedDeviceGroup.objects.create(
+                    name=attrs["controller_group"],
+                    controller=adapter.job.vmanage if hasattr(adapter.job, 'vmanage') else None,
+                )
+        
         _device = OrmDevice(
             name=ids["name"],
             role=Role.objects.get(name=attrs["device_role"]),
             device_type=OrmDeviceType.objects.get(model=attrs["device_type"]),
             serial=attrs["serial"],
             comments=attrs["comments"],
-            controller_managed_device_group=ControllerManagedDeviceGroup.objects.get(name=attrs["controller_group"]),
+            controller_managed_device_group=controller_group,
             location=location,
             status=Status.objects.get(name="Active" if attrs.get("status") == "normal" else "Failed"),
         )
