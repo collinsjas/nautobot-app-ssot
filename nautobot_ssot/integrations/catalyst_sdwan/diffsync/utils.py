@@ -346,7 +346,7 @@ def find_location_by_site_id(site_id, location_queryset=None):
     
     # Strategy 1: Look for locations with matching site ID custom field
     matching_locations = location_queryset.filter(
-        custom_field_data__catalyst_sdwan_site_id=site_id
+        _custom_field_data__catalyst_sdwan_site_id=site_id
     )
     
     if matching_locations.exists():
