@@ -510,6 +510,36 @@ class NautobotInterface(Interface):
             except (ValueError, TypeError):
                 mtu_value = None  # Set to None for non-numeric values
         
+        # Determine interface status based on operational status
+        oper_status = attrs.get("oper_status", "").lower().strip()
+        admin_status = attrs.get("admin_status", "").lower().strip()
+        
+        # Map various SD-WAN status values to Nautobot statuses
+        # SD-WAN can return: "Up", "Down", "if-state-up", "if-state-down", etc.
+        up_statuses = ["up", "if-state-up", "active", "1", "true"]
+        down_statuses = ["down", "if-state-down", "admin-down", "administratively-down", "inactive", "0", "false"]
+        
+        if any(status in oper_status for status in up_statuses):
+            interface_status = "Active"
+        elif any(status in oper_status for status in down_statuses):
+            interface_status = "Planned"  # Use Planned for down interfaces instead of Failed
+        else:
+            # For unknown/empty oper status, check admin status
+            if any(status in admin_status for status in up_statuses):
+                interface_status = "Active"
+            elif any(status in admin_status for status in down_statuses):
+                interface_status = "Planned"
+            else:
+                # Default to Active for interfaces with unknown status
+                interface_status = "Active"
+        
+        # Log the status decision for debugging
+        adapter.job.logger.debug(
+            f"Interface {ids['name']} status mapping: "
+            f"oper_status='{attrs.get('oper_status')}', admin_status='{attrs.get('admin_status')}' "
+            f"-> {interface_status}"
+        )
+        
         _interface = OrmInterface(
             name=ids["name"],
             device=OrmDevice.objects.get(
@@ -522,7 +552,7 @@ class NautobotInterface(Interface):
                 ),
             ),
             description=attrs["description"],
-            status=Status.objects.get(name="Active" if attrs.get("oper_status") == "up" else "Failed"),
+            status=Status.objects.get(name=interface_status),
             type=attrs["type"],
             mtu=mtu_value,
         )
@@ -585,7 +615,35 @@ class NautobotInterface(Interface):
             _interface.custom_field_data["catalyst_sdwan_admin_status"] = attrs["admin_status"]
         if attrs.get("oper_status"):
             _interface.custom_field_data["catalyst_sdwan_oper_status"] = attrs["oper_status"]
-            _interface.status = Status.objects.get(name="Active" if attrs["oper_status"] == "up" else "Failed")
+            # Update status using improved logic
+            oper_status = attrs["oper_status"].lower().strip()
+            admin_status = attrs.get("admin_status", "").lower().strip()
+            
+            # Map various SD-WAN status values to Nautobot statuses
+            up_statuses = ["up", "if-state-up", "active", "1", "true"]
+            down_statuses = ["down", "if-state-down", "admin-down", "administratively-down", "inactive", "0", "false"]
+            
+            if any(status in oper_status for status in up_statuses):
+                interface_status = "Active"
+            elif any(status in oper_status for status in down_statuses):
+                interface_status = "Planned"  # Use Planned for down interfaces instead of Failed
+            else:
+                # For unknown oper status, check admin status
+                if any(status in admin_status for status in up_statuses):
+                    interface_status = "Active"
+                elif any(status in admin_status for status in down_statuses):
+                    interface_status = "Planned"
+                else:
+                    # Default to Active for interfaces with unknown status
+                    interface_status = "Active"
+            
+            # Log the status decision for debugging
+            self.adapter.job.logger.debug(
+                f"Updating interface {self.name} status: "
+                f"oper_status='{attrs['oper_status']}', admin_status='{attrs.get('admin_status')}' "
+                f"-> {interface_status}"
+            )
+            _interface.status = Status.objects.get(name=interface_status)
         _interface.validated_save()
         return super().update(attrs)
 

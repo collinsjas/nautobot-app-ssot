@@ -284,6 +284,15 @@ class CatalystSdwanAdapter(Adapter):
                             )
                             mtu_value = None
                     
+                    # Log interface status for debugging
+                    admin_status = interface_info.get("admin-status")
+                    oper_status = interface_info.get("oper-status")
+                    self.job.logger.info(
+                        f"Interface {interface_name} on {device_name}: "
+                        f"admin-status='{admin_status}' (type: {type(admin_status)}), "
+                        f"oper-status='{oper_status}' (type: {type(oper_status)})"
+                    )
+                    
                     new_interface = self.interface(
                         name=normalized_name,
                         device=device_name,
@@ -291,8 +300,8 @@ class CatalystSdwanAdapter(Adapter):
                         description=interface_info.get("description", ""),
                         type=determine_interface_type(interface_name),
                         site_tag=device_location,  # Use actual device location
-                        admin_status=interface_info.get("admin-status"),
-                        oper_status=interface_info.get("oper-status"),
+                        admin_status=admin_status,
+                        oper_status=oper_status,
                         vpn_id=interface_info.get("vpn-id"),
                         ip_address=interface_info.get("ip-address"),
                         mtu=mtu_value,
