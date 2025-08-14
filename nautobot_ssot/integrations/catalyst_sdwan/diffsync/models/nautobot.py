@@ -152,8 +152,17 @@ class NautobotDeviceType(DeviceType):
             u_height=attrs["u_height"],
             comments=attrs["comments"],
         )
-        _tag = Tag.objects.get(name=PLUGIN_CFG.get("tag"))
-        _devicetype.tags.add(_tag)
+        
+        # Add main tag if configured and exists
+        main_tag_name = PLUGIN_CFG.get("tag")
+        if main_tag_name:
+            try:
+                main_tag = Tag.objects.get(name=main_tag_name)
+                _devicetype.tags.add(main_tag)
+            except Tag.DoesNotExist:
+                # Log warning but don't fail - tag will be created by signals
+                adapter.job.logger.warning(f"Tag {main_tag_name} does not exist for DeviceType {ids['model']}")
+        
         _devicetype.validated_save()
 
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
