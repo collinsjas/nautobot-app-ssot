@@ -148,6 +148,10 @@ class CatalystSdwanAdapter(Adapter):
 
     def load_devices(self):
         """Load devices from SD-WAN."""
+        processed_devices = set()  # Track processed device names + sites to avoid duplicates
+        
+        self.job.logger.info(f"Loading {len(self.devices)} devices from SD-WAN")
+        
         for device_info in self.devices.values():
             personality = device_info.get("personality", "unknown")
             role = map_sdwan_personality_to_role(personality)
@@ -159,26 +163,41 @@ class CatalystSdwanAdapter(Adapter):
                 default_location_name=self.site
             )
             
+            device_name = device_info.get("host-name", device_info.get("deviceId", "Unknown"))
+            device_key = f"{device_name}__{device_location}"
+            
+            # Skip if we've already processed this device
+            if device_key in processed_devices:
+                self.job.logger.warning(
+                    f"Skipping duplicate device: {device_name} at site {device_location} "
+                    f"(key: {device_key})"
+                )
+                continue
+            
+            processed_devices.add(device_key)
+            
+            self.job.logger.debug(f"Processing device: {device_name} at site {device_location}")
+            
             # Log the mapping decision
             if site_id:
                 if extracted_name and extracted_name != device_location:
                     self.job.logger.info(
-                        f"Device {device_info.get('host-name')} with site-id {site_id}: "
+                        f"Device {device_name} with site-id {site_id}: "
                         f"extracted location name '{extracted_name}' mapped to '{device_location}'"
                     )
                 elif device_location != self.site:
                     self.job.logger.info(
-                        f"Device {device_info.get('host-name')} with site-id {site_id} "
+                        f"Device {device_name} with site-id {site_id} "
                         f"mapped to location '{device_location}' (from site pattern)"
                     )
                 else:
                     self.job.logger.debug(
-                        f"Device {device_info.get('host-name')} with site-id {site_id} "
+                        f"Device {device_name} with site-id {site_id} "
                         f"using default location '{device_location}'"
                     )
             
             new_device = self.device(
-                name=device_info.get("host-name", device_info.get("deviceId", "Unknown")),
+                name=device_name,
                 device_type=model,
                 device_role=role,
                 serial=device_info.get("board-serial", device_info.get("chassis-serial-number", "")),
