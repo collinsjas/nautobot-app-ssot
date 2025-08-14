@@ -22,6 +22,7 @@ from nautobot_ssot.integrations.catalyst_sdwan.diffsync.utils import (
     map_sdwan_personality_to_role,
     determine_interface_type,
     normalize_interface_name,
+    map_device_to_location_by_site_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,19 @@ class CatalystSdwanAdapter(Adapter):
             role = map_sdwan_personality_to_role(personality)
             model = device_info.get("device-model", "Unknown")
             
+            # Map device to location based on site ID
+            device_location, site_id = map_device_to_location_by_site_id(
+                device_info, 
+                default_location_name=self.site
+            )
+            
+            # Log if device is mapped to different location than default
+            if device_location != self.site:
+                self.job.logger.info(
+                    f"Device {device_info.get('host-name')} with site-id {site_id} "
+                    f"mapped to location '{device_location}' instead of default '{self.site}'"
+                )
+            
             new_device = self.device(
                 name=device_info.get("host-name", device_info.get("deviceId", "Unknown")),
                 device_type=model,
@@ -159,9 +173,9 @@ class CatalystSdwanAdapter(Adapter):
                 serial=device_info.get("board-serial", device_info.get("chassis-serial-number", "")),
                 comments=PLUGIN_CFG.get("comments", ""),
                 system_ip=device_info.get("system-ip"),
-                site_id=device_info.get("site-id"),
-                site=self.site,
-                site_tag=self.site,
+                site_id=site_id,  # Use the site_id from mapping
+                site=device_location,  # Use mapped location
+                site_tag=device_location,  # Use mapped location for tag
                 controller_group=(
                     self.job.vmanage.controller_managed_device_groups.first().name
                     if self.job.vmanage.controller_managed_device_groups.count() != 0

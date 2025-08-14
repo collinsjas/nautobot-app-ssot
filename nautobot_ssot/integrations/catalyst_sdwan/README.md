@@ -163,6 +163,10 @@ The integration creates several custom fields on Device and Interface objects to
 - `catalyst_sdwan_admin_status`: Administrative status
 - `catalyst_sdwan_oper_status`: Operational status
 
+**Location Custom Fields:**
+- `catalyst_sdwan_site_id`: SD-WAN site ID for location mapping
+- `catalyst_sdwan_site_name`: SD-WAN site name from vManage
+
 ## Usage
 
 1. **Create the Job**: The integration provides a `CatalystSdwanDataSource` job
@@ -209,6 +213,40 @@ SD-WAN VPNs are mapped to Nautobot VRFs with the following defaults:
 - **VPN 0**: Transport VPN (for WAN connectivity)
 - **VPN 512**: Management VPN (for device management)
 - **Other VPNs**: Service VPNs (for user traffic)
+
+## Site ID Mapping
+
+The integration supports automatic device placement based on SD-WAN site IDs:
+
+### How It Works
+
+1. **Location Custom Fields**: The integration creates `catalyst_sdwan_site_id` custom field on Location objects
+2. **Automatic Mapping**: Devices from vManage are mapped to Nautobot locations based on their site-id
+3. **Fallback Behavior**: If no location matches the site ID, devices go to the default location specified in the job
+
+### Setting Up Site Mapping
+
+1. **Configure Location Custom Fields**:
+   Navigate to your locations in Nautobot and set the `catalyst_sdwan_site_id` custom field:
+   ```
+   Location: "Branch-Office-1"
+   catalyst_sdwan_site_id: 100
+   
+   Location: "Data-Center-East" 
+   catalyst_sdwan_site_id: 200
+   ```
+
+2. **Enable Site Mapping**: When running the SSoT job:
+   - **Enable Site Mapping**: Check this option (enabled by default)
+   - **Default Device Location**: Location for devices without matching site ID
+
+3. **Result**: Devices with site-id 100 will be placed in "Branch-Office-1", devices with site-id 200 in "Data-Center-East", etc.
+
+### Benefits
+
+- **Automatic Organization**: Devices are automatically placed in correct locations
+- **Multi-Site Support**: Single job can manage devices across multiple sites
+- **Consistent Mapping**: Site IDs provide reliable device-to-location mapping
 
 ## Testing in Lab Environment
 

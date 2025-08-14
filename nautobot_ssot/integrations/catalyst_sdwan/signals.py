@@ -14,6 +14,7 @@ def register_signals(sender):
     """Register signals for Catalyst SD-WAN integration."""
     nautobot_database_ready.connect(catalyst_sdwan_create_tag, sender=sender)
     nautobot_database_ready.connect(catalyst_sdwan_create_manufacturer, sender=sender)
+    nautobot_database_ready.connect(catalyst_sdwan_location_custom_fields, sender=sender)
     nautobot_database_ready.connect(catalyst_sdwan_device_custom_fields, sender=sender)
     nautobot_database_ready.connect(catalyst_sdwan_interface_custom_fields, sender=sender)
 
@@ -52,6 +53,42 @@ def catalyst_sdwan_create_manufacturer(apps, **kwargs):
         name=manufacturer_name,
         defaults={"description": "Cisco Systems"}
     )
+
+
+def catalyst_sdwan_location_custom_fields(apps, **kwargs):
+    """Create custom fields for Catalyst SD-WAN locations."""
+    ContentType = apps.get_model("contenttypes", "ContentType")
+    Location = apps.get_model("dcim", "Location")
+    CustomField = apps.get_model("extras", "CustomField")
+    
+    logger.info("Creating Location custom fields for Catalyst SD-WAN")
+    
+    # Location custom fields
+    location_custom_fields = [
+        {
+            "key": "catalyst_sdwan_site_id",
+            "type": CustomFieldTypeChoices.TYPE_INTEGER,
+            "label": "Catalyst SD-WAN Site ID",
+            "description": "SD-WAN site identifier for this location",
+        },
+        {
+            "key": "catalyst_sdwan_site_name",
+            "type": CustomFieldTypeChoices.TYPE_TEXT,
+            "label": "Catalyst SD-WAN Site Name",
+            "description": "SD-WAN site name from vManage",
+        },
+    ]
+    
+    # Create location custom fields
+    for cf_dict in location_custom_fields:
+        field, created = CustomField.objects.get_or_create(
+            key=cf_dict["key"],
+            defaults=cf_dict
+        )
+        field.content_types.set([ContentType.objects.get_for_model(Location)])
+        
+        if created:
+            logger.info(f"Created location custom field: {cf_dict['key']}")
 
 
 def catalyst_sdwan_device_custom_fields(apps, **kwargs):

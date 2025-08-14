@@ -30,8 +30,14 @@ class CatalystSdwanDataSource(DataSource, Job):  # pylint: disable=abstract-meth
         queryset=Location.objects.all(),
         display_field="name",
         required=False,
-        label="Device(s) Location",
-        description="New devices will be placed into this location.",
+        label="Default Device Location",
+        description="Default location for devices without site ID mapping.",
+    )
+
+    enable_site_mapping = BooleanVar(
+        default=True,
+        description="Enable automatic site mapping based on SD-WAN site IDs. "
+                   "Devices will be placed in locations with matching catalyst_sdwan_site_id custom field."
     )
 
     debug = BooleanVar(description="Enable for verbose debug logging.")
@@ -95,11 +101,12 @@ class CatalystSdwanDataSource(DataSource, Job):  # pylint: disable=abstract-meth
         self.target_adapter.load()
 
     def run(  # pylint: disable=arguments-differ, too-many-arguments
-        self, dryrun, memory_profiling, vmanage, device_site, debug, *args, **kwargs
+        self, dryrun, memory_profiling, vmanage, device_site, enable_site_mapping, debug, *args, **kwargs
     ):
         """Perform data synchronization."""
         self.vmanage = vmanage
         self.device_site = device_site
+        self.enable_site_mapping = enable_site_mapping
         self.debug = debug
         self.dryrun = dryrun
         self.memory_profiling = memory_profiling

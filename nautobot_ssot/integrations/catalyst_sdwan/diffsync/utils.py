@@ -156,3 +156,89 @@ def find_matching_device_in_nautobot(vmanage_hostname, existing_devices):
             return device
     
     return None
+
+
+def find_location_by_site_id(site_id, location_queryset=None):
+    """
+    Find a Nautobot Location by SD-WAN Site ID custom field.
+    
+    Args:
+        site_id: SD-WAN site ID (integer)
+        location_queryset: Optional queryset to search within
+        
+    Returns:
+        Location object or None
+    """
+    from nautobot.dcim.models import Location
+    
+    if location_queryset is None:
+        location_queryset = Location.objects.all()
+    
+    # Look for locations with matching site ID custom field
+    matching_locations = location_queryset.filter(
+        custom_field_data__catalyst_sdwan_site_id=site_id
+    )
+    
+    if matching_locations.exists():
+        return matching_locations.first()
+    
+    return None
+
+
+def get_default_location_for_site_id(site_id, default_location_name=None):
+    """
+    Get or suggest a location for a given site ID.
+    
+    Args:
+        site_id: SD-WAN site ID
+        default_location_name: Default location name if no mapping found
+        
+    Returns:
+        tuple: (Location object or None, suggested_name)
+    """
+    from nautobot.dcim.models import Location
+    
+    # First try to find existing location with this site ID
+    location = find_location_by_site_id(site_id)
+    if location:
+        return location, location.name
+    
+    # If not found, suggest a name pattern
+    if default_location_name:
+        suggested_name = default_location_name
+    else:
+        suggested_name = f"Site-{site_id}"
+    
+    # Check if a location with suggested name exists
+    try:
+        location = Location.objects.get(name=suggested_name)
+        return location, suggested_name
+    except Location.DoesNotExist:
+        return None, suggested_name
+
+
+def map_device_to_location_by_site_id(device_info, default_location_name=None):
+    """
+    Map a device to a location based on its site ID.
+    
+    Args:
+        device_info: Device information from vManage containing site-id
+        default_location_name: Default location if site mapping not found
+        
+    Returns:
+        tuple: (location_name, site_id)
+    """
+    site_id = device_info.get("site-id")
+    
+    if site_id:
+        location, suggested_name = get_default_location_for_site_id(
+            site_id, default_location_name
+        )
+        if location:
+            return location.name, site_id
+        else:
+            # Return suggested name for location that should be created
+            return suggested_name, site_id
+    
+    # Fall back to default location
+    return default_location_name or "Unknown-Site", None
