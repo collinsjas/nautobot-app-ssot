@@ -118,11 +118,30 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading VRFs: {e}")
 
     def load_device_types(self):
-        """Load Device Types from Nautobot."""
+        """Load Device Types from Nautobot that are related to SD-WAN."""
         try:
-            # Load ALL device types to prevent "already exists" errors
-            # We'll filter them later if needed, but we need to know what exists
-            device_types = DeviceType.objects.all()
+            # Load device types that are used by devices in our target locations
+            # This prevents loading unrelated device types that would be deleted
+            device_types_in_use = set()
+            
+            # Get device types used by devices in our target locations
+            devices_in_locations = Device.objects.filter(
+                location__name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
+            ).exclude(location__name=None)
+            
+            for device in devices_in_locations:
+                if device.device_type:
+                    device_types_in_use.add(device.device_type.id)
+            
+            # Also check for device types tagged with SD-WAN
+            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
+            if main_tag:
+                tagged_device_types = DeviceType.objects.filter(tags=main_tag)
+                for dt in tagged_device_types:
+                    device_types_in_use.add(dt.id)
+            
+            # Load only the device types we identified
+            device_types = DeviceType.objects.filter(id__in=device_types_in_use)
             
             for device_type in device_types:
                 # Ensure part_nbr consistency - use model name if part_number is empty
@@ -140,11 +159,30 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading device types: {e}")
 
     def load_device_roles(self):
-        """Load Device Roles from Nautobot."""
+        """Load Device Roles from Nautobot that are related to SD-WAN."""
         try:
-            # Load ALL device roles to prevent "already exists" errors
-            # Filter to only roles that can be applied to devices
-            device_roles = Role.objects.filter(content_types__model='device')
+            # Load device roles that are used by devices in our target locations
+            # This prevents loading unrelated device roles that would be deleted
+            device_roles_in_use = set()
+            
+            # Get device roles used by devices in our target locations
+            devices_in_locations = Device.objects.filter(
+                location__name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
+            ).exclude(location__name=None)
+            
+            for device in devices_in_locations:
+                if device.role:
+                    device_roles_in_use.add(device.role.id)
+            
+            # Also check for device roles tagged with SD-WAN
+            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
+            if main_tag:
+                tagged_roles = Role.objects.filter(tags=main_tag, content_types__model='device')
+                for role in tagged_roles:
+                    device_roles_in_use.add(role.id)
+            
+            # Load only the device roles we identified
+            device_roles = Role.objects.filter(id__in=device_roles_in_use, content_types__model='device')
             
             for role in device_roles:
                 new_device_role = self.device_role(
@@ -190,10 +228,36 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading devices: {e}")
 
     def load_interface_templates(self):
-        """Load Interface Templates from Nautobot."""
+        """Load Interface Templates from Nautobot that are related to SD-WAN."""
         try:
-            # Load ALL interface templates to prevent "already exists" errors
-            interface_templates = InterfaceTemplate.objects.all()
+            # Load interface templates that belong to device types we're managing
+            # This prevents loading unrelated interface templates that would be deleted
+            interface_templates_in_use = set()
+            
+            # Get device types used by devices in our target locations
+            devices_in_locations = Device.objects.filter(
+                location__name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
+            ).exclude(location__name=None)
+            
+            device_type_ids = set()
+            for device in devices_in_locations:
+                if device.device_type:
+                    device_type_ids.add(device.device_type.id)
+            
+            # Also check for device types tagged with SD-WAN
+            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
+            if main_tag:
+                tagged_device_types = DeviceType.objects.filter(tags=main_tag)
+                for dt in tagged_device_types:
+                    device_type_ids.add(dt.id)
+            
+            # Get interface templates for these device types or tagged templates
+            interface_templates = InterfaceTemplate.objects.filter(device_type_id__in=device_type_ids)
+            
+            # Also include interface templates tagged with SD-WAN
+            if main_tag:
+                tagged_templates = InterfaceTemplate.objects.filter(tags=main_tag)
+                interface_templates = interface_templates.union(tagged_templates)
             
             for interface_template in interface_templates:
                 new_interface_template = self.interface_template(
