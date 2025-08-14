@@ -125,10 +125,13 @@ class NautobotAdapter(Adapter):
             device_types = DeviceType.objects.all()
             
             for device_type in device_types:
+                # Ensure part_nbr consistency - use model name if part_number is empty
+                part_nbr = device_type.part_number or device_type.model
+                
                 new_device_type = self.device_type(
                     model=device_type.model,
                     manufacturer=device_type.manufacturer.name,
-                    part_nbr=device_type.part_number or "",
+                    part_nbr=part_nbr,
                     comments=device_type.comments or "",
                     u_height=device_type.u_height or 1,
                 )

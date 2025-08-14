@@ -145,27 +145,56 @@ class NautobotDeviceType(DeviceType):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create DeviceType object in Nautobot."""
-        _devicetype = OrmDeviceType(
-            model=ids["model"],
-            manufacturer=Manufacturer.objects.get(name=attrs["manufacturer"]),
-            part_number=ids["part_nbr"],
-            u_height=attrs["u_height"],
-            comments=attrs["comments"],
-        )
-        
-        # Add main tag if configured and exists
-        main_tag_name = PLUGIN_CFG.get("tag")
-        if main_tag_name:
-            try:
-                main_tag = Tag.objects.get(name=main_tag_name)
-                _devicetype.tags.add(main_tag)
-            except Tag.DoesNotExist:
-                # Log warning but don't fail - tag will be created by signals
-                adapter.job.logger.warning(f"Tag {main_tag_name} does not exist for DeviceType {ids['model']}")
-        
-        _devicetype.validated_save()
-
-        return super().create(ids=ids, adapter=adapter, attrs=attrs)
+        try:
+            # First check if this device type already exists
+            existing_device_type = OrmDeviceType.objects.filter(
+                model=ids["model"],
+                manufacturer__name=attrs["manufacturer"]
+            ).first()
+            
+            if existing_device_type:
+                adapter.job.logger.info(f"DeviceType {ids['model']} already exists, updating instead of creating")
+                # Update the existing device type
+                existing_device_type.part_number = ids["part_nbr"]
+                existing_device_type.u_height = attrs["u_height"]
+                existing_device_type.comments = attrs["comments"]
+                
+                # Add main tag if configured and exists
+                main_tag_name = PLUGIN_CFG.get("tag")
+                if main_tag_name:
+                    try:
+                        main_tag = Tag.objects.get(name=main_tag_name)
+                        existing_device_type.tags.add(main_tag)
+                    except Tag.DoesNotExist:
+                        adapter.job.logger.warning(f"Tag {main_tag_name} does not exist for DeviceType {ids['model']}")
+                
+                existing_device_type.validated_save()
+                return super().create(ids=ids, adapter=adapter, attrs=attrs)
+            
+            # Create new device type if it doesn't exist
+            _devicetype = OrmDeviceType(
+                model=ids["model"],
+                manufacturer=Manufacturer.objects.get(name=attrs["manufacturer"]),
+                part_number=ids["part_nbr"],
+                u_height=attrs["u_height"],
+                comments=attrs["comments"],
+            )
+            
+            # Add main tag if configured and exists
+            main_tag_name = PLUGIN_CFG.get("tag")
+            if main_tag_name:
+                try:
+                    main_tag = Tag.objects.get(name=main_tag_name)
+                    _devicetype.tags.add(main_tag)
+                except Tag.DoesNotExist:
+                    adapter.job.logger.warning(f"Tag {main_tag_name} does not exist for DeviceType {ids['model']}")
+            
+            _devicetype.validated_save()
+            return super().create(ids=ids, adapter=adapter, attrs=attrs)
+            
+        except Exception as e:
+            adapter.job.logger.error(f"Error creating DeviceType {ids['model']}: {e}")
+            raise
 
     def update(self, attrs):
         """Update DeviceType object in Nautobot."""
