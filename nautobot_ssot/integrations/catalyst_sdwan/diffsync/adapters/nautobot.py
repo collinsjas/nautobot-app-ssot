@@ -138,38 +138,45 @@ class NautobotAdapter(Adapter):
             for device in devices_query:
                 is_sdwan_device = False
                 
-                # Check if device has SD-WAN tags
+                # Check if device has SD-WAN tags (highest priority)
                 if main_tag and device.tags.filter(id=main_tag.id).exists():
                     is_sdwan_device = True
                 elif site_tag and device.tags.filter(id=site_tag.id).exists():
                     is_sdwan_device = True
-                # Check if device has SD-WAN custom fields populated
+                # Check if device has SD-WAN custom fields populated (high priority)
                 elif device.custom_field_data.get("catalyst_sdwan_system_ip"):
                     is_sdwan_device = True
                 elif device.custom_field_data.get("catalyst_sdwan_site_id"):
                     is_sdwan_device = True
                 elif device.custom_field_data.get("catalyst_sdwan_uuid"):
                     is_sdwan_device = True
-                # Check if device type manufacturer suggests SD-WAN
-                elif device.device_type and device.device_type.manufacturer.name == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
-                    # Additional check - look for device models that are typically SD-WAN
+                # Only use device model detection as a last resort and be very specific
+                elif device.device_type:
                     model = device.device_type.model.lower()
-                    if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111', 'isr', 'asr']):
-                        is_sdwan_device = True
+                    manufacturer = device.device_type.manufacturer.name
+                    # Be very specific about SD-WAN models to avoid false positives
+                    if manufacturer == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
+                        # Only include very specific SD-WAN models to avoid catching regular routers
+                        if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111']):
+                            is_sdwan_device = True
                 
                 if is_sdwan_device and device.device_type:
                     device_types_in_use.add(device.device_type.id)
+                    self.job.logger.debug(f"Device type '{device.device_type.model}' in use by SD-WAN device '{device.name}'")
             
             # Also check for device types tagged with SD-WAN
             if main_tag:
                 tagged_device_types = DeviceType.objects.filter(tags=main_tag)
                 for dt in tagged_device_types:
                     device_types_in_use.add(dt.id)
+                    self.job.logger.debug(f"Device type '{dt.model}' tagged with SD-WAN tag")
             
             # Load only the device types we identified
             device_types = DeviceType.objects.filter(id__in=device_types_in_use)
             
             self.job.logger.info(f"Loading {len(device_types)} SD-WAN device types")
+            for device_type in device_types:
+                self.job.logger.debug(f"Loading device type: {device_type.model} (manufacturer: {device_type.manufacturer.name})")
             
             for device_type in device_types:
                 # Ensure part_nbr consistency - use model name if part_number is empty
@@ -207,38 +214,45 @@ class NautobotAdapter(Adapter):
             for device in devices_query:
                 is_sdwan_device = False
                 
-                # Check if device has SD-WAN tags
+                # Check if device has SD-WAN tags (highest priority)
                 if main_tag and device.tags.filter(id=main_tag.id).exists():
                     is_sdwan_device = True
                 elif site_tag and device.tags.filter(id=site_tag.id).exists():
                     is_sdwan_device = True
-                # Check if device has SD-WAN custom fields populated
+                # Check if device has SD-WAN custom fields populated (high priority)
                 elif device.custom_field_data.get("catalyst_sdwan_system_ip"):
                     is_sdwan_device = True
                 elif device.custom_field_data.get("catalyst_sdwan_site_id"):
                     is_sdwan_device = True
                 elif device.custom_field_data.get("catalyst_sdwan_uuid"):
                     is_sdwan_device = True
-                # Check if device type manufacturer suggests SD-WAN
-                elif device.device_type and device.device_type.manufacturer.name == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
-                    # Additional check - look for device models that are typically SD-WAN
+                # Only use device model detection as a last resort and be very specific
+                elif device.device_type:
                     model = device.device_type.model.lower()
-                    if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111', 'isr', 'asr']):
-                        is_sdwan_device = True
+                    manufacturer = device.device_type.manufacturer.name
+                    # Be very specific about SD-WAN models to avoid false positives
+                    if manufacturer == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
+                        # Only include very specific SD-WAN models to avoid catching regular routers
+                        if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111']):
+                            is_sdwan_device = True
                 
                 if is_sdwan_device and device.role:
                     device_roles_in_use.add(device.role.id)
+                    self.job.logger.debug(f"Device role '{device.role.name}' in use by SD-WAN device '{device.name}'")
             
             # Also check for device roles tagged with SD-WAN
             if main_tag:
                 tagged_roles = Role.objects.filter(tags=main_tag, content_types__model='device')
                 for role in tagged_roles:
                     device_roles_in_use.add(role.id)
+                    self.job.logger.debug(f"Device role '{role.name}' tagged with SD-WAN tag")
             
             # Load only the device roles we identified
             device_roles = Role.objects.filter(id__in=device_roles_in_use, content_types__model='device')
             
             self.job.logger.info(f"Loading {len(device_roles)} SD-WAN device roles")
+            for role in device_roles:
+                self.job.logger.debug(f"Loading device role: {role.name}")
             
             for role in device_roles:
                 new_device_role = self.device_role(
@@ -265,32 +279,49 @@ class NautobotAdapter(Adapter):
             main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
             site_tag = get_tag_if_exists(self.site_name)
             
+            self.job.logger.info(f"Evaluating {len(devices_query)} devices in target locations for SD-WAN criteria")
+            
             for device in devices_query:
                 is_sdwan_device = False
+                reason = ""
                 
-                # Check if device has SD-WAN tags
+                # Check if device has SD-WAN tags (highest priority)
                 if main_tag and device.tags.filter(id=main_tag.id).exists():
                     is_sdwan_device = True
+                    reason = f"has main SD-WAN tag '{main_tag.name}'"
                 elif site_tag and device.tags.filter(id=site_tag.id).exists():
                     is_sdwan_device = True
-                # Check if device has SD-WAN custom fields populated
+                    reason = f"has site tag '{site_tag.name}'"
+                # Check if device has SD-WAN custom fields populated (high priority)
                 elif device.custom_field_data.get("catalyst_sdwan_system_ip"):
                     is_sdwan_device = True
+                    reason = f"has catalyst_sdwan_system_ip: {device.custom_field_data.get('catalyst_sdwan_system_ip')}"
                 elif device.custom_field_data.get("catalyst_sdwan_site_id"):
                     is_sdwan_device = True
+                    reason = f"has catalyst_sdwan_site_id: {device.custom_field_data.get('catalyst_sdwan_site_id')}"
                 elif device.custom_field_data.get("catalyst_sdwan_uuid"):
                     is_sdwan_device = True
-                # Check if device type manufacturer suggests SD-WAN
-                elif device.device_type and device.device_type.manufacturer.name == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
-                    # Additional check - look for device models that are typically SD-WAN
+                    reason = f"has catalyst_sdwan_uuid: {device.custom_field_data.get('catalyst_sdwan_uuid')}"
+                # Only use device model detection as a last resort and be very specific
+                elif device.device_type:
                     model = device.device_type.model.lower()
-                    if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111', 'isr', 'asr']):
-                        is_sdwan_device = True
+                    manufacturer = device.device_type.manufacturer.name
+                    # Be very specific about SD-WAN models to avoid false positives
+                    if manufacturer == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
+                        # Only include very specific SD-WAN models to avoid catching regular routers
+                        if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111']):
+                            is_sdwan_device = True
+                            reason = f"device model '{device.device_type.model}' matches SD-WAN pattern"
+                        else:
+                            self.job.logger.debug(f"Device {device.name}: Cisco device but model '{device.device_type.model}' not recognized as SD-WAN")
+                    else:
+                        self.job.logger.debug(f"Device {device.name}: manufacturer '{manufacturer}' is not {PLUGIN_CFG.get('manufacturer_name', 'Cisco')}")
                 
                 if is_sdwan_device:
                     sdwan_devices.append(device)
+                    self.job.logger.info(f"Including SD-WAN device: {device.name} at {device.location.name} - {reason}")
                 else:
-                    self.job.logger.debug(f"Skipping non-SD-WAN device: {device.name} at {device.location.name}")
+                    self.job.logger.info(f"Excluding non-SD-WAN device: {device.name} at {device.location.name}")
             
             self.job.logger.info(f"Loading {len(sdwan_devices)} SD-WAN devices from {len(devices_query)} total devices in target locations")
             
