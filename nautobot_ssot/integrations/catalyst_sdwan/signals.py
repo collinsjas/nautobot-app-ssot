@@ -59,9 +59,11 @@ def catalyst_sdwan_device_custom_fields(apps, **kwargs):
     ContentType = apps.get_model("contenttypes", "ContentType")
     Device = apps.get_model("dcim", "Device")
     CustomField = apps.get_model("extras", "CustomField")
+    CustomFieldChoice = apps.get_model("extras", "CustomFieldChoice")
     
     logger.info("Creating Device custom fields for Catalyst SD-WAN")
     
+    # Text and Integer fields
     device_custom_fields = [
         {
             "key": "catalyst_sdwan_system_ip",
@@ -74,20 +76,6 @@ def catalyst_sdwan_device_custom_fields(apps, **kwargs):
             "type": CustomFieldTypeChoices.TYPE_INTEGER,
             "label": "Catalyst SD-WAN Site ID",
             "description": "SD-WAN site identifier",
-        },
-        {
-            "key": "catalyst_sdwan_personality",
-            "type": CustomFieldTypeChoices.TYPE_SELECT,
-            "label": "Catalyst SD-WAN Personality",
-            "description": "SD-WAN device personality",
-            "choices": ["vmanage", "vbond", "vsmart", "vedge", "cedge"],
-        },
-        {
-            "key": "catalyst_sdwan_reachability",
-            "type": CustomFieldTypeChoices.TYPE_SELECT,
-            "label": "Catalyst SD-WAN Reachability",
-            "description": "Device reachability status",
-            "choices": ["reachable", "unreachable", "unknown"],
         },
         {
             "key": "catalyst_sdwan_device_model",
@@ -109,12 +97,50 @@ def catalyst_sdwan_device_custom_fields(apps, **kwargs):
         },
     ]
     
+    # Create text and integer fields
     for cf_dict in device_custom_fields:
         field, created = CustomField.objects.get_or_create(
             key=cf_dict["key"],
             defaults=cf_dict
         )
         field.content_types.set([ContentType.objects.get_for_model(Device)])
+    
+    # Create SELECT fields with choices
+    select_fields = [
+        {
+            "field_data": {
+                "key": "catalyst_sdwan_personality",
+                "type": CustomFieldTypeChoices.TYPE_SELECT,
+                "label": "Catalyst SD-WAN Personality",
+                "description": "SD-WAN device personality",
+            },
+            "choices": ["vmanage", "vbond", "vsmart", "vedge", "cedge"]
+        },
+        {
+            "field_data": {
+                "key": "catalyst_sdwan_reachability",
+                "type": CustomFieldTypeChoices.TYPE_SELECT,
+                "label": "Catalyst SD-WAN Reachability",
+                "description": "Device reachability status",
+            },
+            "choices": ["reachable", "unreachable", "unknown"]
+        },
+    ]
+    
+    for select_field in select_fields:
+        field, created = CustomField.objects.get_or_create(
+            key=select_field["field_data"]["key"],
+            defaults=select_field["field_data"]
+        )
+        field.content_types.set([ContentType.objects.get_for_model(Device)])
+        
+        # Add choices if field was created or if choices don't exist
+        if created or not CustomFieldChoice.objects.filter(custom_field=field).exists():
+            for choice_value in select_field["choices"]:
+                CustomFieldChoice.objects.get_or_create(
+                    custom_field=field,
+                    value=choice_value
+                )
 
 
 def catalyst_sdwan_interface_custom_fields(apps, **kwargs):
@@ -122,35 +148,61 @@ def catalyst_sdwan_interface_custom_fields(apps, **kwargs):
     ContentType = apps.get_model("contenttypes", "ContentType")
     Interface = apps.get_model("dcim", "Interface")
     CustomField = apps.get_model("extras", "CustomField")
+    CustomFieldChoice = apps.get_model("extras", "CustomFieldChoice")
     
     logger.info("Creating Interface custom fields for Catalyst SD-WAN")
     
-    interface_custom_fields = [
+    # Integer field
+    integer_fields = [
         {
             "key": "catalyst_sdwan_vpn_id",
             "type": CustomFieldTypeChoices.TYPE_INTEGER,
             "label": "Catalyst SD-WAN VPN ID",
             "description": "VPN segment assignment",
         },
-        {
-            "key": "catalyst_sdwan_admin_status",
-            "type": CustomFieldTypeChoices.TYPE_SELECT,
-            "label": "Catalyst SD-WAN Admin Status",
-            "description": "Administrative status",
-            "choices": ["up", "down", "unknown"],
-        },
-        {
-            "key": "catalyst_sdwan_oper_status",
-            "type": CustomFieldTypeChoices.TYPE_SELECT,
-            "label": "Catalyst SD-WAN Operational Status",
-            "description": "Operational status",
-            "choices": ["up", "down", "unknown"],
-        },
     ]
     
-    for cf_dict in interface_custom_fields:
+    # Create integer field
+    for cf_dict in integer_fields:
         field, created = CustomField.objects.get_or_create(
             key=cf_dict["key"],
             defaults=cf_dict
         )
         field.content_types.set([ContentType.objects.get_for_model(Interface)])
+    
+    # Create SELECT fields with choices
+    select_fields = [
+        {
+            "field_data": {
+                "key": "catalyst_sdwan_admin_status",
+                "type": CustomFieldTypeChoices.TYPE_SELECT,
+                "label": "Catalyst SD-WAN Admin Status",
+                "description": "Administrative status",
+            },
+            "choices": ["up", "down", "unknown"]
+        },
+        {
+            "field_data": {
+                "key": "catalyst_sdwan_oper_status",
+                "type": CustomFieldTypeChoices.TYPE_SELECT,
+                "label": "Catalyst SD-WAN Operational Status",
+                "description": "Operational status",
+            },
+            "choices": ["up", "down", "unknown"]
+        },
+    ]
+    
+    for select_field in select_fields:
+        field, created = CustomField.objects.get_or_create(
+            key=select_field["field_data"]["key"],
+            defaults=select_field["field_data"]
+        )
+        field.content_types.set([ContentType.objects.get_for_model(Interface)])
+        
+        # Add choices if field was created or if choices don't exist
+        if created or not CustomFieldChoice.objects.filter(custom_field=field).exists():
+            for choice_value in select_field["choices"]:
+                CustomFieldChoice.objects.get_or_create(
+                    custom_field=field,
+                    value=choice_value
+                )
