@@ -462,7 +462,19 @@ Before testing the integration, ensure you have:
         -d "j_username=your-user&j_password=your-pass"
    ```
 
-3. **Import Errors**:
+3. **Device Already Exists Errors**:
+
+   If you see errors like `Object s356r1__001 already present`, this means:
+   - The device exists in Nautobot but wasn't previously managed by SD-WAN
+   - The integration will now take over managing existing devices
+   - This is normal when transitioning from manual device management to SD-WAN integration
+   
+   **Solutions**:
+   - The integration automatically handles existing devices in the target location
+   - Run the job again - it should succeed on the second attempt
+   - Check device name matching if names differ between vManage and Nautobot
+
+4. **Import Errors**:
 
    ```bash
    # Check Nautobot logs for import issues:
@@ -471,7 +483,7 @@ Before testing the integration, ensure you have:
    docker-compose logs -f nautobot
    ```
 
-4. **Missing Dependencies**:
+5. **Missing Dependencies**:
 
    ```bash
    # Install required packages if missing:

@@ -139,18 +139,21 @@ class NautobotAdapter(Adapter):
                 pass
 
     def load_devices(self):
-        """Load Devices from Nautobot that are tagged with SD-WAN."""
+        """Load Devices from Nautobot from the target location."""
         try:
             tag = Tag.objects.get(name=PLUGIN_CFG.get("tag"))
-            site_tag = Tag.objects.get(name=self.site_name)
             location = Location.objects.get(name=self.site_name)
             
-            devices = Device.objects.filter(
-                tags__in=[tag, site_tag],
-                location=location
-            ).distinct()
+            # Load ALL devices from the location, not just tagged ones
+            # This allows the integration to take over existing devices
+            devices = Device.objects.filter(location=location)
+            
+            self.job.logger.info(f"Loading {devices.count()} devices from location {self.site_name}")
             
             for device in devices:
+                # Check if device has SD-WAN tag to determine if it's managed
+                is_managed = tag in device.tags.all()
+                
                 new_device = self.device(
                     name=device.name,
                     device_type=device.device_type.model,
@@ -173,6 +176,10 @@ class NautobotAdapter(Adapter):
                     uuid=device.custom_field_data.get("catalyst_sdwan_uuid"),
                 )
                 self.add(new_device)
+                
+                if not is_managed:
+                    self.job.logger.info(f"Device {device.name} is not currently SD-WAN managed but will be included in sync")
+                    
         except (Tag.DoesNotExist, Location.DoesNotExist) as e:
             self.job.logger.warning(f"Error loading devices: {e}")
 

@@ -77,3 +77,82 @@ def determine_interface_type(interface_name):
             return interface_type
     
     return "other"
+
+
+def normalize_device_name(vmanage_hostname, existing_device_names=None):
+    """
+    Normalize device names between vManage and Nautobot.
+    
+    This function handles cases where device names might differ between
+    vManage (host-name) and Nautobot device names.
+    
+    Args:
+        vmanage_hostname: Hostname from vManage
+        existing_device_names: List of existing device names in Nautobot
+        
+    Returns:
+        Normalized device name that should match Nautobot
+    """
+    # Basic normalization - remove common suffixes/prefixes that might differ
+    normalized = vmanage_hostname.strip()
+    
+    # Handle common naming patterns
+    # Example: if vManage shows "router.domain.com" but Nautobot has "router"
+    if "." in normalized:
+        base_name = normalized.split(".")[0]
+        # Check if base name exists in Nautobot
+        if existing_device_names and base_name in existing_device_names:
+            return base_name
+    
+    # Handle underscore vs dash differences
+    # Example: "s356r1__001" vs "s356r1-001"
+    if existing_device_names:
+        # Try dash version
+        dash_version = normalized.replace("__", "-").replace("_", "-")
+        if dash_version in existing_device_names:
+            return dash_version
+            
+        # Try underscore version
+        underscore_version = normalized.replace("-", "_")
+        if underscore_version in existing_device_names:
+            return underscore_version
+    
+    return normalized
+
+
+def find_matching_device_in_nautobot(vmanage_hostname, existing_devices):
+    """
+    Find a matching device in Nautobot for a vManage hostname.
+    
+    This handles cases where device names might not match exactly.
+    
+    Args:
+        vmanage_hostname: Hostname from vManage
+        existing_devices: QuerySet or list of Nautobot Device objects
+        
+    Returns:
+        Matching Device object or None
+    """
+    # Try exact match first
+    for device in existing_devices:
+        if device.name == vmanage_hostname:
+            return device
+    
+    # Try normalized matches
+    normalized_name = normalize_device_name(
+        vmanage_hostname, 
+        [d.name for d in existing_devices]
+    )
+    
+    for device in existing_devices:
+        if device.name == normalized_name:
+            return device
+    
+    # Try partial matches (be careful with this)
+    base_vmanage = vmanage_hostname.split(".")[0].lower()
+    for device in existing_devices:
+        base_device = device.name.split(".")[0].lower()
+        if base_vmanage == base_device:
+            return device
+    
+    return None
