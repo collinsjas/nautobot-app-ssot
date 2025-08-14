@@ -158,9 +158,179 @@ def find_matching_device_in_nautobot(vmanage_hostname, existing_devices):
     return None
 
 
+def extract_site_name_from_site_id(site_id):
+    """
+    Extract site name from SD-WAN site ID based on naming convention.
+    
+    Convention: 100### or 10#### where ### or #### is the site name
+    Examples:
+        100123 -> "123"
+        10456 -> "456" 
+        100001 -> "001"
+    
+    Args:
+        site_id: SD-WAN site ID (integer or string)
+        
+    Returns:
+        Extracted site name (string) or None if pattern doesn't match
+    """
+    if site_id is None:
+        return None
+        
+    site_id_str = str(site_id)
+    
+    # Pattern 1: 100### (6 digits total, remove first 3)
+    if site_id_str.startswith("100") and len(site_id_str) == 6:
+        return site_id_str[3:]  # Remove "100" prefix
+    
+    # Pattern 2: 10#### (6 digits total, remove first 2) 
+    if site_id_str.startswith("10") and len(site_id_str) == 6:
+        return site_id_str[2:]  # Remove "10" prefix
+        
+    # Pattern 3: 10### (5 digits total, remove first 2)
+    if site_id_str.startswith("10") and len(site_id_str) == 5:
+        return site_id_str[2:]  # Remove "10" prefix
+    
+    # If no pattern matches, return the full site ID as string
+    return site_id_str
+
+
+def find_location_by_site_name_pattern(site_id, location_queryset=None):
+    """
+    Find location by extracting site name from site ID pattern.
+    
+    Args:
+        site_id: SD-WAN site ID
+        location_queryset: Optional queryset to search within
+        
+    Returns:
+        Location object or None
+    """
+    from nautobot.dcim.models import Location
+    
+    if location_queryset is None:
+        location_queryset = Location.objects.all()
+    
+    # Extract site name from site ID
+    site_name = extract_site_name_from_site_id(site_id)
+    if not site_name:
+        return None
+    
+    # Try to find location with exact name match
+    try:
+        location = location_queryset.get(name=site_name)
+        return location
+    except Location.DoesNotExist:
+        pass
+    
+    # Try with zero-padded versions for common patterns
+    for padding in [3, 4, 5]:
+        padded_name = site_name.zfill(padding)
+        try:
+            location = location_queryset.get(name=padded_name)
+            return location
+        except Location.DoesNotExist:
+            continue
+    
+    return None
+
+
+def extract_location_name_from_site_id(site_id):
+    """
+    Extract location name from SD-WAN site ID based on naming convention.
+    
+    SD-WAN site IDs are 6-digit numbers with multiple patterns:
+    - Format: 100### (on-premise sites) → ### is the location name
+    - Format: 10#### (on-premise sites) → #### is the location name  
+    - Format: 127### (AWS-hosted sites) → ### is the location name
+    
+    Examples:
+    - 100123 → "123"
+    - 100001 → "1" 
+    - 101234 → "1234"
+    - 100050 → "50"
+    - 127001 → "1" (AWS)
+    - 127021 → "21" (AWS)
+    - 127032 → "32" (AWS)
+    
+    Args:
+        site_id: SD-WAN site ID (integer or string)
+        
+    Returns:
+        str: Extracted location name or None if pattern doesn't match
+    """
+    if not site_id:
+        return None
+        
+    # Convert to string and ensure it's 6 digits
+    site_str = str(site_id).zfill(6)
+    
+    if len(site_str) != 6:
+        return None
+    
+    # Check different patterns
+    if site_str.startswith("100"):
+        # Format: 100### (3-digit location name)
+        location_digits = site_str[3:]
+        # Remove leading zeros and return
+        return str(int(location_digits))
+    elif site_str.startswith("127"):
+        # Format: 127### (AWS-hosted, 3-digit location name)
+        location_digits = site_str[3:]
+        # Remove leading zeros and return
+        return str(int(location_digits))
+    elif site_str.startswith("10") and not site_str.startswith("100"):
+        # Format: 10#### (4-digit location name)
+        location_digits = site_str[2:]
+        # Remove leading zeros and return
+        return str(int(location_digits))
+    
+    # If pattern doesn't match, return the full site ID as fallback
+    return str(site_id)
+
+
+def find_location_by_extracted_name(site_id, location_queryset=None):
+    """
+    Find a Nautobot Location by extracting the name from SD-WAN site ID.
+    
+    Args:
+        site_id: SD-WAN site ID 
+        location_queryset: Optional queryset to search within
+        
+    Returns:
+        tuple: (Location object or None, extracted_name)
+    """
+    from nautobot.dcim.models import Location
+    
+    if location_queryset is None:
+        location_queryset = Location.objects.all()
+    
+    # Extract location name from site ID
+    extracted_name = extract_location_name_from_site_id(site_id)
+    
+    if not extracted_name:
+        return None, None
+    
+    # Try to find location with extracted name
+    try:
+        location = location_queryset.get(name=extracted_name)
+        return location, extracted_name
+    except Location.DoesNotExist:
+        return None, extracted_name
+    except Location.MultipleObjectsReturned:
+        # If multiple locations, get the first one
+        location = location_queryset.filter(name=extracted_name).first()
+        return location, extracted_name
+
+
 def find_location_by_site_id(site_id, location_queryset=None):
     """
-    Find a Nautobot Location by SD-WAN Site ID custom field.
+    Find a Nautobot Location by SD-WAN Site ID using multiple strategies.
+    
+    This function tries multiple approaches:
+    1. Look for locations with matching catalyst_sdwan_site_id custom field
+    2. Extract location name from site ID based on naming convention (100### or 10####)
+    3. Direct name matching as fallback
     
     Args:
         site_id: SD-WAN site ID (integer)
@@ -174,13 +344,18 @@ def find_location_by_site_id(site_id, location_queryset=None):
     if location_queryset is None:
         location_queryset = Location.objects.all()
     
-    # Look for locations with matching site ID custom field
+    # Strategy 1: Look for locations with matching site ID custom field
     matching_locations = location_queryset.filter(
         custom_field_data__catalyst_sdwan_site_id=site_id
     )
     
     if matching_locations.exists():
         return matching_locations.first()
+    
+    # Strategy 2: Extract location name from site ID pattern
+    location, extracted_name = find_location_by_extracted_name(site_id, location_queryset)
+    if location:
+        return location
     
     return None
 
@@ -198,13 +373,16 @@ def get_default_location_for_site_id(site_id, default_location_name=None):
     """
     from nautobot.dcim.models import Location
     
-    # First try to find existing location with this site ID
+    # First try to find existing location with this site ID or pattern
     location = find_location_by_site_id(site_id)
     if location:
         return location, location.name
     
-    # If not found, suggest a name pattern
-    if default_location_name:
+    # If not found, suggest a name based on pattern
+    extracted_name = extract_site_name_from_site_id(site_id)
+    if extracted_name:
+        suggested_name = extracted_name
+    elif default_location_name:
         suggested_name = default_location_name
     else:
         suggested_name = f"Site-{site_id}"
@@ -219,26 +397,80 @@ def get_default_location_for_site_id(site_id, default_location_name=None):
 
 def map_device_to_location_by_site_id(device_info, default_location_name=None):
     """
-    Map a device to a location based on its site ID.
+    Map a device to a location based on its site ID using naming conventions.
+    
+    SD-WAN site IDs follow pattern: 100### or 10#### where ### or #### is the location name.
+    
+    Examples:
+    - site-id 100123 → location "123"  
+    - site-id 101456 → location "1456"
+    - site-id 100001 → location "1"
     
     Args:
         device_info: Device information from vManage containing site-id
         default_location_name: Default location if site mapping not found
         
     Returns:
-        tuple: (location_name, site_id)
+        tuple: (location_name, site_id, extracted_location_name)
     """
     site_id = device_info.get("site-id")
     
     if site_id:
-        location, suggested_name = get_default_location_for_site_id(
-            site_id, default_location_name
-        )
+        # Try to find existing location using multiple strategies
+        location = find_location_by_site_id(site_id)
         if location:
-            return location.name, site_id
-        else:
-            # Return suggested name for location that should be created
-            return suggested_name, site_id
+            return location.name, site_id, location.name
+        
+        # Extract location name from site ID pattern
+        extracted_name = extract_location_name_from_site_id(site_id)
+        if extracted_name:
+            return extracted_name, site_id, extracted_name
+        
+        # Fallback to site ID as location name  
+        return f"Site-{site_id}", site_id, str(site_id)
     
     # Fall back to default location
-    return default_location_name or "Unknown-Site", None
+    return default_location_name or "Unknown-Site", None, None
+    
+    # Fall back to default location
+    return default_location_name or "Unknown-Site", None, None
+
+
+def populate_location_site_id_field(location, site_id, logger=None):
+    """
+    Populate the catalyst_sdwan_site_id custom field for a location if not already set.
+    
+    Args:
+        location: Nautobot Location object
+        site_id: SD-WAN site ID to populate
+        logger: Optional logger for info messages
+        
+    Returns:
+        bool: True if field was updated, False if already set or error
+    """
+    try:
+        current_site_id = location.custom_field_data.get("catalyst_sdwan_site_id")
+        
+        # Only update if field is empty or None
+        if current_site_id is None or current_site_id == "":
+            location.custom_field_data["catalyst_sdwan_site_id"] = site_id
+            location.save()
+            
+            if logger:
+                logger.info(
+                    f"Populated catalyst_sdwan_site_id={site_id} for location '{location.name}'"
+                )
+            return True
+        elif current_site_id != site_id:
+            if logger:
+                logger.warning(
+                    f"Location '{location.name}' has catalyst_sdwan_site_id={current_site_id} "
+                    f"but device reports site-id={site_id}. Not updating."
+                )
+        
+        return False
+        
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to populate site ID for location '{location.name}': {e}")
+        return False

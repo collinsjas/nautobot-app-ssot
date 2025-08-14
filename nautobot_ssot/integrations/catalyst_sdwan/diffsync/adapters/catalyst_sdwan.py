@@ -153,18 +153,29 @@ class CatalystSdwanAdapter(Adapter):
             role = map_sdwan_personality_to_role(personality)
             model = device_info.get("device-model", "Unknown")
             
-            # Map device to location based on site ID
-            device_location, site_id = map_device_to_location_by_site_id(
+            # Map device to location based on site ID using naming convention
+            device_location, site_id, extracted_name = map_device_to_location_by_site_id(
                 device_info, 
                 default_location_name=self.site
             )
             
-            # Log if device is mapped to different location than default
-            if device_location != self.site:
-                self.job.logger.info(
-                    f"Device {device_info.get('host-name')} with site-id {site_id} "
-                    f"mapped to location '{device_location}' instead of default '{self.site}'"
-                )
+            # Log the mapping decision
+            if site_id:
+                if extracted_name and extracted_name != device_location:
+                    self.job.logger.info(
+                        f"Device {device_info.get('host-name')} with site-id {site_id}: "
+                        f"extracted location name '{extracted_name}' mapped to '{device_location}'"
+                    )
+                elif device_location != self.site:
+                    self.job.logger.info(
+                        f"Device {device_info.get('host-name')} with site-id {site_id} "
+                        f"mapped to location '{device_location}' (from site pattern)"
+                    )
+                else:
+                    self.job.logger.debug(
+                        f"Device {device_info.get('host-name')} with site-id {site_id} "
+                        f"using default location '{device_location}'"
+                    )
             
             new_device = self.device(
                 name=device_info.get("host-name", device_info.get("deviceId", "Unknown")),

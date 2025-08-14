@@ -216,35 +216,69 @@ SD-WAN VPNs are mapped to Nautobot VRFs with the following defaults:
 
 ## Site ID Mapping
 
-The integration supports automatic device placement based on SD-WAN site IDs:
+The integration supports automatic device placement based on SD-WAN site IDs with intelligent name extraction:
+
+### Naming Convention Support
+
+The integration recognizes your 6-digit SD-WAN site ID patterns and automatically extracts location names:
+
+- **Format**: `100###` where `###` is 1-3 digit location name (on-premise)
+- **Format**: `10####` where `####` is 4-digit location name (on-premise)
+- **Format**: `127###` where `###` is 1-3 digit location name (AWS-hosted)
+
+**Examples**:
+- Site ID `100123` → Location name `123` (on-premise)
+- Site ID `100001` → Location name `1` (on-premise)
+- Site ID `101456` → Location name `1456` (on-premise)
+- Site ID `127001` → Location name `1` (AWS)
+- Site ID `127021` → Location name `21` (AWS)
+- Site ID `127032` → Location name `32` (AWS)
 
 ### How It Works
 
-1. **Location Custom Fields**: The integration creates `catalyst_sdwan_site_id` custom field on Location objects
-2. **Automatic Mapping**: Devices from vManage are mapped to Nautobot locations based on their site-id
-3. **Fallback Behavior**: If no location matches the site ID, devices go to the default location specified in the job
+1. **Automatic Name Extraction**: Devices are automatically mapped to locations based on extracted names from site IDs
+2. **Custom Field Fallback**: If automatic extraction fails, looks for locations with `catalyst_sdwan_site_id` custom field
+3. **Fallback Behavior**: If no location matches, devices go to the default location specified in the job
 
 ### Setting Up Site Mapping
 
-1. **Configure Location Custom Fields**:
-   Navigate to your locations in Nautobot and set the `catalyst_sdwan_site_id` custom field:
-   ```
-   Location: "Branch-Office-1"
-   catalyst_sdwan_site_id: 100
-   
-   Location: "Data-Center-East" 
-   catalyst_sdwan_site_id: 200
-   ```
+**Option 1: Automatic (Recommended)**  
+Just ensure your locations follow the naming convention:
 
-2. **Enable Site Mapping**: When running the SSoT job:
-   - **Enable Site Mapping**: Check this option (enabled by default)
-   - **Default Device Location**: Location for devices without matching site ID
+Location Names: `123`, `1`, `1456`, `50`  
+No custom fields needed - automatic extraction works!
 
-3. **Result**: Devices with site-id 100 will be placed in "Branch-Office-1", devices with site-id 200 in "Data-Center-East", etc.
+**Option 2: Manual Custom Field Mapping**  
+For non-standard names, set the custom field:
+
+Location: "Branch-Office-NYC" with `catalyst_sdwan_site_id: 100123`  
+Location: "HQ-Main" with `catalyst_sdwan_site_id: 101456`
+
+**Option 3: Mixed Approach**  
+Use both - custom fields override automatic extraction when present.
+
+### Job Configuration
+
+When running the SSoT job:
+- **Enable Site Mapping**: Check this option (enabled by default)
+- **Default Device Location**: Location for devices that can't be mapped
+
+### Examples
+
+**Your Site ID Pattern**:
+**Benefits of Site Mapping**:
+- Device with site-id `100123` → Automatically placed in location `123` (on-premise)
+- Device with site-id `127021` → Automatically placed in location `21` (AWS)
+- No manual device placement required
+- Consistent location organization
+- Device with site-id `101456` → Automatically placed in location `1456`  
+- Device with site-id `999999` → Goes to default location (pattern doesn't match)
 
 ### Benefits
 
-- **Automatic Organization**: Devices are automatically placed in correct locations
+- **Zero Configuration**: Works automatically with your existing location names
+- **Intelligent Mapping**: Handles 1-4 digit location names correctly
+- **Flexible Fallback**: Multiple strategies ensure devices are always placed somewhere
 - **Multi-Site Support**: Single job can manage devices across multiple sites
 - **Consistent Mapping**: Site IDs provide reliable device-to-location mapping
 
