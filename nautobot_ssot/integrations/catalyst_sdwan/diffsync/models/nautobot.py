@@ -255,6 +255,40 @@ class NautobotDevice(Device):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Device object in Nautobot."""
+        
+        # Get or create the location for this device
+        location_type = (
+            adapter.job.device_site.location_type
+            if adapter.job.device_site
+            else adapter.job.vmanage.location.location_type
+        )
+        
+        try:
+            location = Location.objects.get(name=ids["site"], location_type=location_type)
+        except Location.DoesNotExist:
+            # Create the location if it doesn't exist
+            adapter.job.logger.info(f"Creating missing location: {ids['site']} of type {location_type.name}")
+            location = Location.objects.create(
+                name=ids["site"],
+                location_type=location_type,
+                status=Status.objects.get(name="Active"),  # Use Active status for new locations
+            )
+            
+            # Add tags to the new location
+            main_tag_name = PLUGIN_CFG.get("tag")
+            if main_tag_name:
+                try:
+                    main_tag = Tag.objects.get(name=main_tag_name)
+                    location.tags.add(main_tag)
+                except Tag.DoesNotExist:
+                    pass  # Tag will be created by signals
+            
+            # Add site-specific tag to location
+            site_tag_name = attrs["site_tag"]
+            if site_tag_name:
+                site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+                location.tags.add(site_tag)
+        
         _device = OrmDevice(
             name=ids["name"],
             role=Role.objects.get(name=attrs["device_role"]),
@@ -262,12 +296,7 @@ class NautobotDevice(Device):
             serial=attrs["serial"],
             comments=attrs["comments"],
             controller_managed_device_group=ControllerManagedDeviceGroup.objects.get(name=attrs["controller_group"]),
-            location=Location.objects.get(
-                name=ids["site"],
-                location_type=adapter.job.device_site.location_type
-                if adapter.job.device_site
-                else adapter.job.vmanage.location.location_type,
-            ),
+            location=location,
             status=Status.objects.get(name="Active" if attrs.get("status") == "normal" else "Failed"),
         )
 
