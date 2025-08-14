@@ -319,43 +319,86 @@ class NautobotDevice(Device):
                     controller=adapter.job.vmanage if hasattr(adapter.job, 'vmanage') else None,
                 )
         
-        _device = OrmDevice(
-            name=ids["name"],
-            role=Role.objects.get(name=attrs["device_role"]),
-            device_type=OrmDeviceType.objects.get(model=attrs["device_type"]),
-            serial=attrs["serial"],
-            comments=attrs["comments"],
-            controller_managed_device_group=controller_group,
-            location=location,
-            status=Status.objects.get(name="Active" if attrs.get("status") == "normal" else "Failed"),
-        )
-
-        # Add Catalyst SD-WAN specific custom fields
-        _device.custom_field_data["catalyst_sdwan_system_ip"] = attrs.get("system_ip")
-        _device.custom_field_data["catalyst_sdwan_site_id"] = attrs.get("site_id")
-        _device.custom_field_data["catalyst_sdwan_personality"] = attrs.get("personality")
-        _device.custom_field_data["catalyst_sdwan_reachability"] = attrs.get("reachability")
-        _device.custom_field_data["catalyst_sdwan_device_model"] = attrs.get("device_model")
-        _device.custom_field_data["catalyst_sdwan_version"] = attrs.get("version")
-        _device.custom_field_data["catalyst_sdwan_uuid"] = attrs.get("uuid")
-        
-        # Add main tag if configured
-        main_tag_name = PLUGIN_CFG.get("tag")
-        if main_tag_name:
-            try:
-                main_tag = Tag.objects.get(name=main_tag_name)
-                _device.tags.add(main_tag)
-            except Tag.DoesNotExist:
-                # Log warning but don't fail - tag will be created by signals
-                pass
-        
-        # Add site-specific tag
-        site_tag_name = attrs["site_tag"]
-        if site_tag_name:
-            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-            _device.tags.add(site_tag)
+        # Check if device already exists and handle accordingly
+        try:
+            existing_device = OrmDevice.objects.get(name=ids["name"], location=location)
+            adapter.job.logger.info(f"Device {ids['name']} already exists at {location.name}, updating it")
             
-        _device.validated_save()
+            # Update existing device
+            existing_device.role = Role.objects.get(name=attrs["device_role"])
+            existing_device.device_type = OrmDeviceType.objects.get(model=attrs["device_type"])
+            existing_device.serial = attrs["serial"]
+            existing_device.comments = attrs["comments"]
+            existing_device.controller_managed_device_group = controller_group
+            existing_device.status = Status.objects.get(name="Active" if attrs.get("status") == "normal" else "Failed")
+            
+            # Update SD-WAN specific custom fields
+            existing_device.custom_field_data["catalyst_sdwan_system_ip"] = attrs.get("system_ip")
+            existing_device.custom_field_data["catalyst_sdwan_site_id"] = attrs.get("site_id")
+            existing_device.custom_field_data["catalyst_sdwan_personality"] = attrs.get("personality")
+            existing_device.custom_field_data["catalyst_sdwan_reachability"] = attrs.get("reachability")
+            existing_device.custom_field_data["catalyst_sdwan_device_model"] = attrs.get("device_model")
+            existing_device.custom_field_data["catalyst_sdwan_version"] = attrs.get("version")
+            existing_device.custom_field_data["catalyst_sdwan_uuid"] = attrs.get("uuid")
+            
+            # Add tags
+            main_tag_name = PLUGIN_CFG.get("tag")
+            if main_tag_name:
+                try:
+                    main_tag = Tag.objects.get(name=main_tag_name)
+                    existing_device.tags.add(main_tag)
+                except Tag.DoesNotExist:
+                    pass
+            
+            site_tag_name = attrs["site_tag"]
+            if site_tag_name:
+                site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+                existing_device.tags.add(site_tag)
+            
+            existing_device.validated_save()
+            _device = existing_device
+            
+        except OrmDevice.DoesNotExist:
+            # Create new device if it doesn't exist
+            adapter.job.logger.info(f"Creating new device: {ids['name']} at {location.name}")
+            
+            _device = OrmDevice(
+                name=ids["name"],
+                role=Role.objects.get(name=attrs["device_role"]),
+                device_type=OrmDeviceType.objects.get(model=attrs["device_type"]),
+                serial=attrs["serial"],
+                comments=attrs["comments"],
+                controller_managed_device_group=controller_group,
+                location=location,
+                status=Status.objects.get(name="Active" if attrs.get("status") == "normal" else "Failed"),
+            )
+
+            # Add Catalyst SD-WAN specific custom fields
+            _device.custom_field_data["catalyst_sdwan_system_ip"] = attrs.get("system_ip")
+            _device.custom_field_data["catalyst_sdwan_site_id"] = attrs.get("site_id")
+            _device.custom_field_data["catalyst_sdwan_personality"] = attrs.get("personality")
+            _device.custom_field_data["catalyst_sdwan_reachability"] = attrs.get("reachability")
+            _device.custom_field_data["catalyst_sdwan_device_model"] = attrs.get("device_model")
+            _device.custom_field_data["catalyst_sdwan_version"] = attrs.get("version")
+            _device.custom_field_data["catalyst_sdwan_uuid"] = attrs.get("uuid")
+            
+            # Add main tag if configured
+            main_tag_name = PLUGIN_CFG.get("tag")
+            if main_tag_name:
+                try:
+                    main_tag = Tag.objects.get(name=main_tag_name)
+                    _device.tags.add(main_tag)
+                except Tag.DoesNotExist:
+                    # Log warning but don't fail - tag will be created by signals
+                    pass
+            
+            # Add site-specific tag
+            site_tag_name = attrs["site_tag"]
+            if site_tag_name:
+                site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+                _device.tags.add(site_tag)
+                
+            _device.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
     def update(self, attrs):

@@ -183,37 +183,24 @@ def extract_site_name_from_site_id(site_id):
     """
     Extract site name from SD-WAN site ID based on naming convention.
     
-    Convention: 100### or 10#### where ### or #### is the site name
+    This is a legacy function - use extract_location_name_from_site_id instead.
+    Maintained for backward compatibility.
+    
+    Convention: 100### or 10#### where ### or #### is the site name (min 3 digits)
     Examples:
         100123 -> "123"
+        100001 -> "001" (padded to 3 digits)
         10456 -> "456" 
-        100001 -> "001"
+        100050 -> "050" (padded to 3 digits)
     
     Args:
         site_id: SD-WAN site ID (integer or string)
         
     Returns:
-        Extracted site name (string) or None if pattern doesn't match
+        Extracted site name (string) with minimum 3 digits or None if pattern doesn't match
     """
-    if site_id is None:
-        return None
-        
-    site_id_str = str(site_id)
-    
-    # Pattern 1: 100### (6 digits total, remove first 3)
-    if site_id_str.startswith("100") and len(site_id_str) == 6:
-        return site_id_str[3:]  # Remove "100" prefix
-    
-    # Pattern 2: 10#### (6 digits total, remove first 2) 
-    if site_id_str.startswith("10") and len(site_id_str) == 6:
-        return site_id_str[2:]  # Remove "10" prefix
-        
-    # Pattern 3: 10### (5 digits total, remove first 2)
-    if site_id_str.startswith("10") and len(site_id_str) == 5:
-        return site_id_str[2:]  # Remove "10" prefix
-    
-    # If no pattern matches, return the full site ID as string
-    return site_id_str
+    # Use the new function for consistency
+    return extract_location_name_from_site_id(site_id)
 
 
 def find_location_by_site_name_pattern(site_id, location_queryset=None):
@@ -261,24 +248,27 @@ def extract_location_name_from_site_id(site_id):
     Extract location name from SD-WAN site ID based on naming convention.
     
     SD-WAN site IDs are 6-digit numbers with multiple patterns:
-    - Format: 100### (on-premise sites) → ### is the location name
-    - Format: 10#### (on-premise sites) → #### is the location name  
-    - Format: 127### (AWS-hosted sites) → ### is the location name
+    - Format: 100### (on-premise sites) → ### is the location name (min 3 digits)
+    - Format: 10#### (on-premise sites) → #### is the location name (min 3 digits)
+    - Format: 127### (AWS-hosted sites) → ### is the location name (min 3 digits)
+    
+    Location names must have a minimum of 3 digits. If the extracted number 
+    has fewer than 3 digits, it's padded with leading zeros.
     
     Examples:
     - 100123 → "123"
-    - 100001 → "1" 
-    - 101234 → "1234"
-    - 100050 → "50"
-    - 127001 → "1" (AWS)
-    - 127021 → "21" (AWS)
-    - 127032 → "32" (AWS)
+    - 100001 → "001" (padded to 3 digits)
+    - 101234 → "1234" 
+    - 100050 → "050" (padded to 3 digits)
+    - 127001 → "001" (AWS, padded to 3 digits)
+    - 127021 → "021" (AWS, padded to 3 digits)
+    - 127032 → "032" (AWS, padded to 3 digits)
     
     Args:
         site_id: SD-WAN site ID (integer or string)
         
     Returns:
-        str: Extracted location name or None if pattern doesn't match
+        str: Extracted location name with minimum 3 digits or None if pattern doesn't match
     """
     if not site_id:
         return None
@@ -293,21 +283,36 @@ def extract_location_name_from_site_id(site_id):
     if site_str.startswith("100"):
         # Format: 100### (3-digit location name)
         location_digits = site_str[3:]
-        # Remove leading zeros and return
-        return str(int(location_digits))
+        # Convert to int to remove leading zeros, then pad to minimum 3 digits
+        location_num = int(location_digits)
+        return f"{location_num:03d}"  # Ensure minimum 3 digits with leading zeros
+        
     elif site_str.startswith("127"):
         # Format: 127### (AWS-hosted, 3-digit location name)
         location_digits = site_str[3:]
-        # Remove leading zeros and return
-        return str(int(location_digits))
+        # Convert to int to remove leading zeros, then pad to minimum 3 digits  
+        location_num = int(location_digits)
+        return f"{location_num:03d}"  # Ensure minimum 3 digits with leading zeros
+        
     elif site_str.startswith("10") and not site_str.startswith("100"):
         # Format: 10#### (4-digit location name)
         location_digits = site_str[2:]
-        # Remove leading zeros and return
-        return str(int(location_digits))
+        # Convert to int to remove leading zeros, then ensure minimum 3 digits
+        location_num = int(location_digits)
+        if location_num < 1000:
+            return f"{location_num:03d}"  # Pad to 3 digits for numbers < 1000
+        else:
+            return f"{location_num:04d}"  # Keep 4 digits for numbers >= 1000
     
-    # If pattern doesn't match, return the full site ID as fallback
-    return str(site_id)
+    # If pattern doesn't match, return the full site ID as fallback with minimum 3 digits
+    try:
+        site_num = int(site_id)
+        if site_num < 1000:
+            return f"{site_num:03d}"
+        else:
+            return str(site_num)
+    except ValueError:
+        return str(site_id)
 
 
 def find_location_by_extracted_name(site_id, location_queryset=None):
