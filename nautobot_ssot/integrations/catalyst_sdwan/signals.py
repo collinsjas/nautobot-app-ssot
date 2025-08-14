@@ -37,9 +37,11 @@ def _ensure_tag(apps, name, color):
 def catalyst_sdwan_create_tag(apps, **kwargs):
     """Create Catalyst SD-WAN tag."""
     logger.info("Creating tags for Catalyst SD-WAN")
+    tag_name = PLUGIN_CFG.get("tag", "catalyst_sdwan")
+    logger.info(f"Creating tag: {tag_name}")
     _ensure_tag(
         apps=apps,
-        name=PLUGIN_CFG.get("catalyst_sdwan_tag", "catalyst_sdwan"),
+        name=tag_name,
         color="2196f3"  # Blue color for SD-WAN
     )
 

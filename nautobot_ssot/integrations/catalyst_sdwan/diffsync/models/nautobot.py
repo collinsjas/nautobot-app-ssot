@@ -40,8 +40,23 @@ class NautobotTenant(Tenant):
     def create(cls, adapter, ids, attrs):
         """Create Tenant object in Nautobot."""
         _tenant = OrmTenant(name=ids["name"], description=attrs["description"], comments=attrs["comments"])
-        _tenant.tags.add(Tag.objects.get(name=PLUGIN_CFG.get("tag")))
-        _tenant.tags.add(Tag.objects.get(name=attrs["site_tag"]))
+        
+        # Add main tag if configured
+        main_tag_name = PLUGIN_CFG.get("tag")
+        if main_tag_name:
+            try:
+                main_tag = Tag.objects.get(name=main_tag_name)
+                _tenant.tags.add(main_tag)
+            except Tag.DoesNotExist:
+                # Log warning but don't fail - tag will be created by signals
+                pass
+        
+        # Add site-specific tag
+        site_tag_name = attrs["site_tag"]
+        if site_tag_name:
+            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+            _tenant.tags.add(site_tag)
+            
         _tenant.validated_save()
 
         Namespace.objects.create(name=ids["name"])
@@ -77,8 +92,23 @@ class NautobotVrf(Vrf):
             namespace=Namespace.objects.get(name=attrs["namespace"]),
             rd=attrs.get("rd")
         )
-        _vrf.tags.add(Tag.objects.get(name=PLUGIN_CFG.get("tag")))
-        _vrf.tags.add(Tag.objects.get(name=attrs["site_tag"]))
+        
+        # Add main tag if configured
+        main_tag_name = PLUGIN_CFG.get("tag")
+        if main_tag_name:
+            try:
+                main_tag = Tag.objects.get(name=main_tag_name)
+                _vrf.tags.add(main_tag)
+            except Tag.DoesNotExist:
+                # Log warning but don't fail - tag will be created by signals
+                pass
+        
+        # Add site-specific tag
+        site_tag_name = attrs["site_tag"]
+        if site_tag_name:
+            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+            _vrf.tags.add(site_tag)
+            
         _vrf.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
@@ -200,8 +230,22 @@ class NautobotDevice(Device):
         _device.custom_field_data["catalyst_sdwan_version"] = attrs.get("version")
         _device.custom_field_data["catalyst_sdwan_uuid"] = attrs.get("uuid")
         
-        _device.tags.add(Tag.objects.get(name=PLUGIN_CFG.get("tag")))
-        _device.tags.add(Tag.objects.get(name=attrs["site_tag"]))
+        # Add main tag if configured
+        main_tag_name = PLUGIN_CFG.get("tag")
+        if main_tag_name:
+            try:
+                main_tag = Tag.objects.get(name=main_tag_name)
+                _device.tags.add(main_tag)
+            except Tag.DoesNotExist:
+                # Log warning but don't fail - tag will be created by signals
+                pass
+        
+        # Add site-specific tag
+        site_tag_name = attrs["site_tag"]
+        if site_tag_name:
+            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+            _device.tags.add(site_tag)
+            
         _device.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
@@ -320,8 +364,22 @@ class NautobotInterface(Interface):
         _interface.custom_field_data["catalyst_sdwan_admin_status"] = attrs.get("admin_status")
         _interface.custom_field_data["catalyst_sdwan_oper_status"] = attrs.get("oper_status")
         
-        _interface.tags.add(Tag.objects.get(name=PLUGIN_CFG.get("tag")))
-        _interface.tags.add(Tag.objects.get(name=attrs["site_tag"]))
+        # Add main tag if configured
+        main_tag_name = PLUGIN_CFG.get("tag")
+        if main_tag_name:
+            try:
+                main_tag = Tag.objects.get(name=main_tag_name)
+                _interface.tags.add(main_tag)
+            except Tag.DoesNotExist:
+                # Log warning but don't fail - tag will be created by signals
+                pass
+        
+        # Add site-specific tag
+        site_tag_name = attrs["site_tag"]
+        if site_tag_name:
+            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
+            _interface.tags.add(site_tag)
+            
         _interface.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 

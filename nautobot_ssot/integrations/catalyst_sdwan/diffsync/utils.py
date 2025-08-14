@@ -14,10 +14,31 @@ def load_yamlfile(yaml_file):
         return None
 
 
+def normalize_device_model_name(vmanage_model):
+    """Map vManage device model names to our YAML file names."""
+    model_mappings = {
+        "vedge-C8000V": "C8000v",
+        "vedge-C8200-1N-4T": "C8200-1N-4T", 
+        "vedge-C8300-1N1S-4T2X": "C8300-1N1S-4T2X",
+        "vedge-cloud": "vedge-cloud",
+        "vedge-C1111-8PW": "C1111-8PW",
+        "vmanage": "vmanage",
+        "vsmart": "vsmart", 
+        "vbond": "vbond",
+        # Add more mappings as needed
+    }
+    
+    # Return the mapped name if it exists, otherwise return the original
+    return model_mappings.get(vmanage_model, vmanage_model)
+
+
 def get_device_type_definition(model_name):
     """Get device type definition from YAML file."""
     devicetype_file_path = os.path.join(os.path.dirname(__file__), "..", "device-types")
-    yaml_file = os.path.join(devicetype_file_path, f"{model_name}.yaml")
+    
+    # Normalize the model name to match our YAML files
+    normalized_model = normalize_device_model_name(model_name)
+    yaml_file = os.path.join(devicetype_file_path, f"{normalized_model}.yaml")
     
     if os.path.exists(yaml_file):
         return load_yamlfile(yaml_file)

@@ -21,6 +21,7 @@ from nautobot_ssot.integrations.catalyst_sdwan.diffsync.utils import (
     get_device_type_definition,
     map_sdwan_personality_to_role,
     determine_interface_type,
+    normalize_device_model_name,
     normalize_interface_name,
     map_device_to_location_by_site_id,
 )
@@ -122,12 +123,21 @@ class CatalystSdwanAdapter(Adapter):
                 device_models.add(model)
         
         for model in device_models:
+            # Get device specifications from YAML (using normalized name)
+            normalized_model = normalize_device_model_name(model)
+            device_specs = get_device_type_definition(normalized_model)
+            
+            # Use specs if available, otherwise use defaults
+            u_height = 1
+            if device_specs:
+                u_height = device_specs.get("u_height", 1)
+            
             _devicetype = self.device_type(
-                model=model,
+                model=model,  # Store original model name
                 manufacturer=PLUGIN_CFG.get("manufacturer_name", "Cisco"),
                 part_nbr=model,  # Use model as part number if no specific part number
                 comments=PLUGIN_CFG.get("comments", ""),
-                u_height=1,  # Default height
+                u_height=u_height,
             )
             self.add(_devicetype)
 
@@ -222,8 +232,16 @@ class CatalystSdwanAdapter(Adapter):
 
     def load_interfaces(self):
         """Load interfaces from SD-WAN devices."""
+        processed_interfaces = set()  # Track processed interfaces to avoid duplicates
+        
         for device_id, device_info in self.devices.items():
             device_name = device_info.get("host-name", device_info.get("deviceId", "Unknown"))
+            
+            # Get device location using the same logic as device loading
+            device_location, site_id, extracted_name = map_device_to_location_by_site_id(
+                device_info, 
+                default_location_name=self.site
+            )
             
             try:
                 interfaces = self.conn.get_device_interfaces(device_id)
@@ -236,14 +254,25 @@ class CatalystSdwanAdapter(Adapter):
                     
                     # Normalize interface name
                     normalized_name = normalize_interface_name(interface_name)
+                    interface_key = f"{normalized_name}__{device_name}__{device_location}"
+                    
+                    # Skip if we've already processed this interface
+                    if interface_key in processed_interfaces:
+                        self.job.logger.warning(
+                            f"Skipping duplicate interface: {normalized_name} on {device_name} at {device_location} "
+                            f"(key: {interface_key})"
+                        )
+                        continue
+                    
+                    processed_interfaces.add(interface_key)
                     
                     new_interface = self.interface(
                         name=normalized_name,
                         device=device_name,
-                        site=self.site,
+                        site=device_location,  # Use actual device location, not default site
                         description=interface_info.get("description", ""),
                         type=determine_interface_type(interface_name),
-                        site_tag=self.site,
+                        site_tag=device_location,  # Use actual device location
                         admin_status=interface_info.get("admin-status"),
                         oper_status=interface_info.get("oper-status"),
                         vpn_id=interface_info.get("vpn-id"),
@@ -260,12 +289,15 @@ class CatalystSdwanAdapter(Adapter):
         
         for model in device_models:
             if model and model != "Unknown":
-                device_specs = get_device_type_definition(model)
+                # Normalize the model name to match our YAML files
+                normalized_model = normalize_device_model_name(model)
+                device_specs = get_device_type_definition(normalized_model)
+                
                 if device_specs and device_specs.get("interfaces"):
                     for intf in device_specs["interfaces"]:
                         new_interfacetemplate = self.interface_template(
                             name=intf["name"],
-                            device_type=model,
+                            device_type=model,  # Use original model name as stored in Nautobot
                             type=intf["type"],
                             mgmt_only=intf.get("mgmt_only", False),
                             site_tag=self.site,

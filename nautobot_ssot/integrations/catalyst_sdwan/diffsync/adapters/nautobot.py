@@ -1,7 +1,16 @@
 """DiffSync Nautobot Adapter for Cisco Catalyst SD-WAN integration with SSoT app."""
 
 from diffsync import Adapter
-from nautobot.dcim.models import Controller, Device, DeviceType, Interface, Location
+from nautobot    def load_device_types(self):
+        """Load Device Types from Nautobot that are tagged with SD-WAN."""
+        try:
+            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
+            
+            if main_tag:
+                device_types = DeviceType.objects.filter(tags=main_tag)
+            else:
+                # If no tag exists, don't load any device types
+                device_types = DeviceType.objects.none().models import Controller, Device, DeviceType, Interface, Location
 from nautobot.dcim.models import InterfaceTemplate
 from nautobot.extras.models import Role, Status, Tag
 from nautobot.ipam.models import IPAddress, Namespace, Prefix, VRF
@@ -17,6 +26,16 @@ from nautobot_ssot.integrations.catalyst_sdwan.diffsync.models.nautobot import (
     NautobotTenant,
     NautobotVrf,
 )
+
+
+def get_tag_if_exists(tag_name):
+    """Get tag if it exists, otherwise return None."""
+    if not tag_name:
+        return None
+    try:
+        return Tag.objects.get(name=tag_name)
+    except Tag.DoesNotExist:
+        return None
 
 
 class NautobotAdapter(Adapter):
@@ -64,9 +83,17 @@ class NautobotAdapter(Adapter):
     def load_tenants(self):
         """Load Tenants from Nautobot that are tagged with SD-WAN."""
         try:
-            tag = Tag.objects.get(name=PLUGIN_CFG.get("tag"))
-            site_tag = Tag.objects.get(name=self.site_name)
-            tenants = Tenant.objects.filter(tags__in=[tag, site_tag]).distinct()
+            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
+            site_tag = get_tag_if_exists(self.site_name)
+            
+            # Build tag filter - only include tags that exist
+            tags_to_filter = [tag for tag in [main_tag, site_tag] if tag is not None]
+            
+            if tags_to_filter:
+                tenants = Tenant.objects.filter(tags__in=tags_to_filter).distinct()
+            else:
+                # If no tags exist, load tenants by name pattern instead
+                tenants = Tenant.objects.filter(name__startswith=f"{PLUGIN_CFG.get('tenant_prefix', 'Catalyst-SDWAN')}:")
             
             for tenant in tenants:
                 tenant_name = tenant.name
@@ -85,9 +112,17 @@ class NautobotAdapter(Adapter):
     def load_vrfs(self):
         """Load VRFs from Nautobot that are tagged with SD-WAN."""
         try:
-            tag = Tag.objects.get(name=PLUGIN_CFG.get("tag"))
-            site_tag = Tag.objects.get(name=self.site_name)
-            vrfs = VRF.objects.filter(tags__in=[tag, site_tag]).distinct()
+            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
+            site_tag = get_tag_if_exists(self.site_name)
+            
+            # Build tag filter - only include tags that exist
+            tags_to_filter = [tag for tag in [main_tag, site_tag] if tag is not None]
+            
+            if tags_to_filter:
+                vrfs = VRF.objects.filter(tags__in=tags_to_filter).distinct()
+            else:
+                # If no tags exist, load all VRFs (or add other filtering logic)
+                vrfs = VRF.objects.all()
             
             for vrf in vrfs:
                 tenant_name = vrf.tenant.name if vrf.tenant else "Global"
