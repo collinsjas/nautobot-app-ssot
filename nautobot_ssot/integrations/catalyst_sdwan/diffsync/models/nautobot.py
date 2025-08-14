@@ -74,8 +74,11 @@ class NautobotTenant(Tenant):
         """Delete Tenant object in Nautobot."""
         self.adapter.job.logger.warning(f"Tenant {self.name} will be deleted.")
         super().delete()
-        _tenant = OrmTenant.objects.get(name=self.name)
-        self.adapter.objects_to_delete["tenant"].append(_tenant)
+        try:
+            _tenant = OrmTenant.objects.get(name=self.name)
+            self.adapter.objects_to_delete["tenant"].append(_tenant)
+        except OrmTenant.DoesNotExist:
+            self.adapter.job.logger.warning(f"Tenant {self.name} does not exist, skipping deletion.")
         return self
 
 
@@ -127,9 +130,12 @@ class NautobotVrf(Vrf):
         """Delete VRF object in Nautobot."""
         self.adapter.job.logger.warning(f"VRF {self.name} will be deleted.")
         super().delete()
-        _tenant = OrmTenant.objects.get(name=self.tenant)
-        _vrf = OrmVrf.objects.get(name=self.name, tenant=_tenant)
-        self.adapter.objects_to_delete["vrf"].append(_vrf)
+        try:
+            _tenant = OrmTenant.objects.get(name=self.tenant)
+            _vrf = OrmVrf.objects.get(name=self.name, tenant=_tenant)
+            self.adapter.objects_to_delete["vrf"].append(_vrf)
+        except (OrmTenant.DoesNotExist, OrmVrf.DoesNotExist):
+            self.adapter.job.logger.warning(f"VRF {self.name} or tenant {self.tenant} does not exist, skipping deletion.")
         return self
 
 
@@ -167,8 +173,11 @@ class NautobotDeviceType(DeviceType):
     def delete(self):
         """Delete DeviceType object in Nautobot."""
         self.adapter.job.logger.warning(f"Device Type {self.model} will be deleted.")
-        _devicetype = OrmDeviceType.objects.get(model=self.model)
-        _devicetype.delete()
+        try:
+            _devicetype = OrmDeviceType.objects.get(model=self.model)
+            _devicetype.delete()
+        except OrmDeviceType.DoesNotExist:
+            self.adapter.job.logger.warning(f"DeviceType {self.model} does not exist, skipping deletion.")
         return super().delete()
 
 
@@ -194,8 +203,11 @@ class NautobotDeviceRole(DeviceRole):
     def delete(self):
         """Delete DeviceRole object in Nautobot."""
         self.adapter.job.logger.warning(f"Device Role {self.name} will be deleted.")
-        _devicerole = Role.objects.get(name=self.name)
-        _devicerole.delete()
+        try:
+            _devicerole = Role.objects.get(name=self.name)
+            _devicerole.delete()
+        except Role.DoesNotExist:
+            self.adapter.job.logger.warning(f"DeviceRole {self.name} does not exist, skipping deletion.")
         return super().delete()
 
 
@@ -285,16 +297,19 @@ class NautobotDevice(Device):
         """Delete Device object in Nautobot."""
         self.adapter.job.logger.warning(f"Device {self.name} will be deleted.")
         super().delete()
-        _device = OrmDevice.objects.get(
-            name=self.name,
-            location=Location.objects.get(
-                name=self.site,
-                location_type=self.adapter.job.device_site.location_type
-                if self.adapter.job.device_site
-                else self.adapter.job.vmanage.location.location_type,
-            ),
-        )
-        self.adapter.objects_to_delete["device"].append(_device)
+        try:
+            _device = OrmDevice.objects.get(
+                name=self.name,
+                location=Location.objects.get(
+                    name=self.site,
+                    location_type=self.adapter.job.device_site.location_type
+                    if self.adapter.job.device_site
+                    else self.adapter.job.vmanage.location.location_type,
+                ),
+            )
+            self.adapter.objects_to_delete["device"].append(_device)
+        except (OrmDevice.DoesNotExist, Location.DoesNotExist):
+            self.adapter.job.logger.warning(f"Device {self.name} or location {self.site} does not exist, skipping deletion.")
         return self
 
 
@@ -328,11 +343,14 @@ class NautobotInterfaceTemplate(InterfaceTemplate):
     def delete(self):
         """Delete InterfaceTemplate object in Nautobot."""
         self.adapter.job.logger.warning(f"Interface Template {self.name} will be deleted.")
-        _interfacetemplate = OrmInterfaceTemplate.objects.get(
-            name=self.name,
-            device_type=OrmDeviceType.objects.get(model=self.device_type),
-        )
-        _interfacetemplate.delete()
+        try:
+            _interfacetemplate = OrmInterfaceTemplate.objects.get(
+                name=self.name,
+                device_type=OrmDeviceType.objects.get(model=self.device_type),
+            )
+            _interfacetemplate.delete()
+        except (OrmInterfaceTemplate.DoesNotExist, OrmDeviceType.DoesNotExist):
+            self.adapter.job.logger.warning(f"InterfaceTemplate {self.name} or DeviceType {self.device_type} does not exist, skipping deletion.")
         return super().delete()
 
 
