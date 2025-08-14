@@ -1,9 +1,5 @@
 # Catalyst SD-WAN SSoT Integration - Implementation Summary
 
-## Overview
-
-I've created a complete Catalyst SD-WAN integration for the Nautobot SSoT app, following the established ACI integration pattern. This integration provides bi-directional synchronization between Cisco Catalyst SD-WAN (vManage) and Nautobot with DiffSync technology for intelligent updates.
-
 ## Created Files Structure
 
 ```mermaid
