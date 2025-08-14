@@ -6,36 +6,49 @@ I've created a complete Catalyst SD-WAN integration for the Nautobot SSoT app, f
 
 ## Created Files Structure
 
-```
-nautobot_ssot/integrations/catalyst_sdwan/
-├── __init__.py                          # Package initialization
-├── constant.py                          # Configuration constants
-├── jobs.py                             # SSoT job definition
-├── signals.py                          # Signal handlers
-├── README.md                           # Comprehensive documentation
-├── diffsync/
-│   ├── __init__.py                     # DiffSync package init
-│   ├── client.py                       # vManage API client
-│   ├── utils.py                        # Utility functions
-│   ├── adapters/
-│   │   ├── __init__.py                 # Adapters package init
-│   │   ├── catalyst_sdwan.py           # SD-WAN source adapter
-│   │   └── nautobot.py                 # Nautobot target adapter
-│   └── models/
-│       ├── __init__.py                 # Models package init
-│       ├── base.py                     # Base DiffSync models
-│       └── nautobot.py                 # Nautobot model implementations
-└── device-types/                      # Device type definitions
-    ├── C8000v.yaml                     # Catalyst 8000V router
-    ├── C8300-1N1S-4T2X.yaml          # Catalyst 8300 platform
-    ├── vmanage.yaml                    # vManage controller
-    ├── vbond.yaml                      # vBond orchestrator
-    └── vsmart.yaml                     # vSmart controller
+```mermaid
+graph TD
+    A[catalyst_sdwan/] --> B[__init__.py<br/>Package initialization]
+    A --> C[constant.py<br/>Configuration constants]
+    A --> D[jobs.py<br/>SSoT job definition]
+    A --> E[signals.py<br/>Signal handlers]
+    A --> F[README.md<br/>Comprehensive documentation]
+    A --> G[diffsync/]
+    A --> R[device-types/]
+    
+    G --> H[__init__.py<br/>DiffSync package init]
+    G --> I[client.py<br/>vManage API client]
+    G --> J[utils.py<br/>Utility functions]
+    G --> K[adapters/]
+    G --> O[models/]
+    
+    K --> L[__init__.py<br/>Adapters package init]
+    K --> M[catalyst_sdwan.py<br/>SD-WAN source adapter]
+    K --> N[nautobot.py<br/>Nautobot target adapter]
+    
+    O --> P[__init__.py<br/>Models package init]
+    O --> Q[base.py<br/>Base DiffSync models]
+    O --> S[nautobot.py<br/>Nautobot model implementations]
+    
+    R --> T[C8000v.yaml<br/>Catalyst 8000V router]
+    R --> U[C8300-1N1S-4T2X.yaml<br/>Catalyst 8300 platform]
+    R --> V[vmanage.yaml<br/>vManage controller]
+    R --> W[vbond.yaml<br/>vBond orchestrator]
+    R --> X[vsmart.yaml<br/>vSmart controller]
+    
+    classDef folder fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef file fill:#f3e5f5,stroke:#4a148c,stroke-width:1px
+    classDef yaml fill:#e8f5e8,stroke:#2e7d32,stroke-width:1px
+    
+    class A,G,K,O,R folder
+    class B,C,D,E,F,H,I,J,L,M,N,P,Q,S file
+    class T,U,V,W,X yaml
 ```
 
 ## Key Features Implemented
 
 ### 1. **DiffSync Models**
+
 - **Tenant**: Global tenant for SD-WAN objects
 - **VRF**: Maps SD-WAN VPNs to Nautobot VRFs
 - **Device**: Comprehensive device model with SD-WAN specific attributes
@@ -45,6 +58,7 @@ nautobot_ssot/integrations/catalyst_sdwan/
 - **DeviceTemplate**: For tracking template assignments (extensible)
 
 ### 2. **vManage API Client** (`client.py`)
+
 - Session-based authentication with XSRF token handling
 - Comprehensive API endpoints for:
   - Device inventory (`/dataservice/device`)
@@ -58,6 +72,7 @@ nautobot_ssot/integrations/catalyst_sdwan/
 ### 3. **Intelligent Adapters**
 
 #### Catalyst SD-WAN Adapter (`catalyst_sdwan.py`)
+
 - Loads devices, interfaces, VRFs, and templates from vManage
 - Maps SD-WAN personalities to device roles:
   - `vmanage` → vmanage
@@ -69,13 +84,16 @@ nautobot_ssot/integrations/catalyst_sdwan/
 - Device type auto-detection with YAML template support
 
 #### Nautobot Adapter (`nautobot.py`)
+
 - Loads existing SD-WAN objects from Nautobot
 - Tag-based filtering for SD-WAN specific objects
 - Custom field population for SD-WAN metadata
 - Relationship management for complex objects
 
 ### 4. **Device Type Definitions**
+
 Pre-configured YAML files for common SD-WAN devices:
+
 - **C8000v**: Virtual edge router with 8 GigE interfaces
 - **C8300-1N1S-4T2X**: Physical edge platform with mixed interfaces
 - **vManage**: Management controller with basic connectivity
@@ -83,6 +101,7 @@ Pre-configured YAML files for common SD-WAN devices:
 - **vSmart**: Policy controller configuration
 
 ### 5. **Utility Functions** (`utils.py`)
+
 - YAML device type loader
 - Interface name normalization
 - SD-WAN personality to role mapping
@@ -90,6 +109,7 @@ Pre-configured YAML files for common SD-WAN devices:
 - Extensible for custom mappings
 
 ### 6. **SSoT Job Integration** (`jobs.py`)
+
 - Complete job class `CatalystSdwanDataSource`
 - Parameter validation for vManage controller and location
 - Data mapping visualization
@@ -99,9 +119,11 @@ Pre-configured YAML files for common SD-WAN devices:
 ## SD-WAN Specific Enhancements
 
 ### Custom Fields
+
 The integration creates and populates custom fields for SD-WAN metadata:
 
 **Device Fields:**
+
 - `catalyst_sdwan_system_ip`: Overlay system IP
 - `catalyst_sdwan_site_id`: SD-WAN site identifier
 - `catalyst_sdwan_personality`: Controller type
@@ -111,18 +133,22 @@ The integration creates and populates custom fields for SD-WAN metadata:
 - `catalyst_sdwan_uuid`: Unique device identifier
 
 **Interface Fields:**
+
 - `catalyst_sdwan_vpn_id`: VPN segment assignment
 - `catalyst_sdwan_admin_status`: Administrative state
 - `catalyst_sdwan_oper_status`: Operational state
 
 ### VPN/VRF Management
+
 - Automatic VRF creation for discovered VPNs
 - Standard VPN mappings (0=Transport, 512=Management)
 - Namespace isolation for multi-tenancy
 - Route distinguisher support
 
 ### Template Tracking
+
 Foundation for tracking device template assignments:
+
 - Template ID and name correlation
 - Attachment status monitoring
 - Configuration drift detection (extensible)
@@ -130,7 +156,9 @@ Foundation for tracking device template assignments:
 ## Integration Patterns
 
 ### Following ACI Model
+
 The implementation follows the established ACI integration patterns:
+
 - Similar directory structure and file organization
 - Consistent naming conventions and coding style
 - Same DiffSync architecture and model relationships
@@ -138,6 +166,7 @@ The implementation follows the established ACI integration patterns:
 - Unified error handling and logging
 
 ### DiffSync Benefits
+
 - **Intelligent Updates**: Only changes what's different
 - **Conflict Resolution**: Handles concurrent modifications
 - **Rollback Capability**: Can revert changes if needed
@@ -147,6 +176,7 @@ The implementation follows the established ACI integration patterns:
 ## Configuration Requirements
 
 ### Prerequisites
+
 1. **Controller Object**: vManage controller in Nautobot
 2. **External Integration**: With vManage credentials and SSL settings
 3. **Managed Device Group**: For SD-WAN device organization
@@ -154,6 +184,7 @@ The implementation follows the established ACI integration patterns:
 5. **Custom Fields**: Automatically created during first run
 
 ### Settings
+
 ```python
 PLUGINS_CONFIG["nautobot_ssot"] = {
     "catalyst_sdwan_tag": "catalyst_sdwan",
@@ -174,16 +205,19 @@ PLUGINS_CONFIG["nautobot_ssot"] = {
 ## Extensibility
 
 ### Adding Device Types
+
 1. Create YAML definition in `device-types/`
 2. Define interfaces with types and management flags
 3. Automatic interface template creation
 
 ### Custom Attributes
+
 1. Add fields to DiffSync models
 2. Update adapters to populate data
 3. Extend API client for additional endpoints
 
 ### Template Integration
+
 1. Enhance template model definitions
 2. Add configuration comparison logic
 3. Implement policy synchronization
@@ -191,18 +225,21 @@ PLUGINS_CONFIG["nautobot_ssot"] = {
 ## Benefits
 
 ### For Network Operations
+
 - **Single Source of Truth**: Centralized SD-WAN inventory
 - **Automated Documentation**: Self-maintaining device database
 - **Change Tracking**: Historical record of modifications
 - **Consistency**: Synchronized data across systems
 
 ### For Automation
+
 - **API Access**: Nautobot REST API for all SD-WAN data
 - **GraphQL**: Advanced querying capabilities
 - **Webhooks**: Event-driven automation triggers
 - **Integration**: Easy connection to other tools
 
 ### For Compliance
+
 - **Audit Trail**: Complete change history
 - **Configuration Drift**: Detection of unauthorized changes
 - **Reporting**: Compliance status dashboards
