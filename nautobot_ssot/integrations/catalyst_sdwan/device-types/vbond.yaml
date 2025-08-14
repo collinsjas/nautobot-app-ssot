@@ -1,0 +1,14 @@
+manufacturer: Cisco
+model: vbond
+slug: vbond
+part_number: vbond
+u_height: 1
+is_full_depth: false
+comments: Cisco vBond Orchestrator
+interfaces:
+  - name: eth0
+    type: 1000base-t
+    mgmt_only: true
+  - name: eth1
+    type: 1000base-t
+    mgmt_only: false

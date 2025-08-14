@@ -1,0 +1,32 @@
+manufacturer: Cisco
+model: C8000v
+slug: c8000v
+part_number: C8000v
+u_height: 1
+is_full_depth: false
+comments: Cisco Catalyst 8000V Edge Software Router
+interfaces:
+  - name: GigabitEthernet1
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet2
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet3
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet4
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet5
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet6
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet7
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet8
+    type: 1000base-t
+    mgmt_only: false

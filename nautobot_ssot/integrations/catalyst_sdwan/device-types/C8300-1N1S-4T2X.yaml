@@ -1,0 +1,29 @@
+manufacturer: Cisco
+model: C8300-1N1S-4T2X
+slug: c8300-1n1s-4t2x
+part_number: C8300-1N1S-4T2X
+u_height: 1
+is_full_depth: true
+comments: Cisco Catalyst 8300-1N1S-4T2X Edge Platform
+interfaces:
+  - name: GigabitEthernet0/0/0
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet0/0/1
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet0/0/2
+    type: 1000base-t
+    mgmt_only: false
+  - name: GigabitEthernet0/0/3
+    type: 1000base-t
+    mgmt_only: false
+  - name: TenGigabitEthernet0/1/0
+    type: 10gbase-t
+    mgmt_only: false
+  - name: TenGigabitEthernet0/1/1
+    type: 10gbase-t
+    mgmt_only: false
+  - name: GigabitEthernet0
+    type: 1000base-t
+    mgmt_only: true
