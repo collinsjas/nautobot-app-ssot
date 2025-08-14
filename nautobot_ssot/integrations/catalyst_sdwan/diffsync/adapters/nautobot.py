@@ -118,15 +118,11 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading VRFs: {e}")
 
     def load_device_types(self):
-        """Load Device Types from Nautobot that are tagged with SD-WAN."""
+        """Load Device Types from Nautobot."""
         try:
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            
-            if main_tag:
-                device_types = DeviceType.objects.filter(tags=main_tag)
-            else:
-                # If no tag exists, don't load any device types
-                device_types = DeviceType.objects.none()
+            # Load ALL device types to prevent "already exists" errors
+            # We'll filter them later if needed, but we need to know what exists
+            device_types = DeviceType.objects.all()
             
             for device_type in device_types:
                 new_device_type = self.device_type(
@@ -141,15 +137,11 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading device types: {e}")
 
     def load_device_roles(self):
-        """Load Device Roles from Nautobot that are tagged with SD-WAN."""
+        """Load Device Roles from Nautobot."""
         try:
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            
-            if main_tag:
-                device_roles = Role.objects.filter(tags=main_tag)
-            else:
-                # If no tag exists, don't load any device roles
-                device_roles = Role.objects.none()
+            # Load ALL device roles to prevent "already exists" errors
+            # Filter to only roles that can be applied to devices
+            device_roles = Role.objects.filter(content_types__model='device')
             
             for role in device_roles:
                 new_device_role = self.device_role(
@@ -195,15 +187,10 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading devices: {e}")
 
     def load_interface_templates(self):
-        """Load Interface Templates from Nautobot that are tagged with SD-WAN."""
+        """Load Interface Templates from Nautobot."""
         try:
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            
-            if main_tag:
-                interface_templates = InterfaceTemplate.objects.filter(tags=main_tag)
-            else:
-                # If no tag exists, don't load any interface templates
-                interface_templates = InterfaceTemplate.objects.none()
+            # Load ALL interface templates to prevent "already exists" errors
+            interface_templates = InterfaceTemplate.objects.all()
             
             for interface_template in interface_templates:
                 new_interface_template = self.interface_template(
