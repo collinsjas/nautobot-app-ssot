@@ -500,6 +500,16 @@ class NautobotInterface(Interface):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Interface object in Nautobot."""
+        # Validate MTU - must be >= 1 or None for Django validation
+        mtu_value = attrs.get("mtu")
+        if mtu_value is not None:
+            try:
+                mtu_value = int(mtu_value)
+                if mtu_value <= 0:
+                    mtu_value = None  # Set to None for invalid values
+            except (ValueError, TypeError):
+                mtu_value = None  # Set to None for non-numeric values
+        
         _interface = OrmInterface(
             name=ids["name"],
             device=OrmDevice.objects.get(
@@ -514,7 +524,7 @@ class NautobotInterface(Interface):
             description=attrs["description"],
             status=Status.objects.get(name="Active" if attrs.get("oper_status") == "up" else "Failed"),
             type=attrs["type"],
-            mtu=attrs.get("mtu"),
+            mtu=mtu_value,
         )
         
         # Add SD-WAN specific custom fields
@@ -560,7 +570,15 @@ class NautobotInterface(Interface):
         if attrs.get("type"):
             _interface.type = attrs["type"]
         if attrs.get("mtu"):
-            _interface.mtu = attrs["mtu"]
+            # Validate MTU - must be >= 1 or None for Django validation
+            mtu_value = attrs["mtu"]
+            try:
+                mtu_value = int(mtu_value)
+                if mtu_value <= 0:
+                    mtu_value = None  # Set to None for invalid values
+            except (ValueError, TypeError):
+                mtu_value = None  # Set to None for non-numeric values
+            _interface.mtu = mtu_value
         if attrs.get("vpn_id"):
             _interface.custom_field_data["catalyst_sdwan_vpn_id"] = attrs["vpn_id"]
         if attrs.get("admin_status"):

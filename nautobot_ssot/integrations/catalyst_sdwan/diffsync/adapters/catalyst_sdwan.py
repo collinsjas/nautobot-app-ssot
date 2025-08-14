@@ -266,6 +266,24 @@ class CatalystSdwanAdapter(Adapter):
                     
                     processed_interfaces.add(interface_key)
                     
+                    # Validate and log MTU value
+                    mtu_value = interface_info.get("mtu")
+                    if mtu_value is not None:
+                        try:
+                            mtu_int = int(mtu_value)
+                            if mtu_int <= 0:
+                                self.job.logger.warning(
+                                    f"Invalid MTU value {mtu_value} for interface {interface_name} "
+                                    f"on device {device_name}, will be set to None"
+                                )
+                                mtu_value = None
+                        except (ValueError, TypeError):
+                            self.job.logger.warning(
+                                f"Non-numeric MTU value '{mtu_value}' for interface {interface_name} "
+                                f"on device {device_name}, will be set to None"
+                            )
+                            mtu_value = None
+                    
                     new_interface = self.interface(
                         name=normalized_name,
                         device=device_name,
@@ -277,7 +295,7 @@ class CatalystSdwanAdapter(Adapter):
                         oper_status=interface_info.get("oper-status"),
                         vpn_id=interface_info.get("vpn-id"),
                         ip_address=interface_info.get("ip-address"),
-                        mtu=interface_info.get("mtu"),
+                        mtu=mtu_value,
                     )
                     self.add(new_interface)
             except Exception as e:
