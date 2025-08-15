@@ -530,9 +530,13 @@ class NautobotInterface(Interface):
             except (ValueError, TypeError):
                 mtu_value = None  # Set to None for non-numeric values
         
-        # Determine interface status based on operational status
-        oper_status = attrs.get("oper_status", "").lower().strip()
-        admin_status = attrs.get("admin_status", "").lower().strip()
+        # Determine interface status based on operational status with proper null checking
+        oper_status_raw = attrs.get("oper_status")
+        admin_status_raw = attrs.get("admin_status")
+        
+        # Safely convert to lowercase strings, handling None values
+        oper_status = (oper_status_raw or "").lower().strip() if oper_status_raw is not None else ""
+        admin_status = (admin_status_raw or "").lower().strip() if admin_status_raw is not None else ""
         
         # Map various SD-WAN status values to Nautobot statuses
         # SD-WAN can return: "Up", "Down", "if-state-up", "if-state-down", etc.
@@ -633,9 +637,13 @@ class NautobotInterface(Interface):
             _interface.custom_field_data["catalyst_sdwan_admin_status"] = attrs["admin_status"]
         if attrs.get("oper_status"):
             _interface.custom_field_data["catalyst_sdwan_oper_status"] = attrs["oper_status"]
-            # Update status using improved logic
-            oper_status = attrs["oper_status"].lower().strip()
-            admin_status = attrs.get("admin_status", "").lower().strip()
+            # Update status using improved logic with proper null checking
+            oper_status_raw = attrs["oper_status"]
+            admin_status_raw = attrs.get("admin_status")
+            
+            # Safely convert to lowercase strings, handling None values
+            oper_status = (oper_status_raw or "").lower().strip() if oper_status_raw is not None else ""
+            admin_status = (admin_status_raw or "").lower().strip() if admin_status_raw is not None else ""
             
             # Map various SD-WAN status values to Nautobot statuses
             up_statuses = ["up", "if-state-up", "active", "1", "true"]
