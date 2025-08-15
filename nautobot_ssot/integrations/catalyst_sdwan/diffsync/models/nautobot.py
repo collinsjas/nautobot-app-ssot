@@ -42,6 +42,23 @@ def get_tag_if_exists(tag_name):
         return None
 
 
+def normalize_interface_status(status_value):
+    """Normalize interface status values to match custom field choices."""
+    if not status_value:
+        return "unknown"
+    
+    # Convert to string and normalize
+    status_str = str(status_value).lower().strip()
+    
+    # Map various status formats to the expected choices: down, unknown, up
+    if status_str in ["up", "if-state-up", "active", "1", "true", "enabled"]:
+        return "up"
+    elif status_str in ["down", "if-state-down", "admin-down", "administratively-down", "inactive", "0", "false", "disabled"]:
+        return "down"
+    else:
+        return "unknown"
+
+
 class NautobotTenant(Tenant):
     """Nautobot implementation of the Tenant Model."""
 
@@ -581,10 +598,10 @@ class NautobotInterface(Interface):
             mtu=mtu_value,
         )
         
-        # Add SD-WAN specific custom fields
+        # Add SD-WAN specific custom fields with normalized status values
         _interface.custom_field_data["catalyst_sdwan_vpn_id"] = attrs.get("vpn_id")
-        _interface.custom_field_data["catalyst_sdwan_admin_status"] = attrs.get("admin_status")
-        _interface.custom_field_data["catalyst_sdwan_oper_status"] = attrs.get("oper_status")
+        _interface.custom_field_data["catalyst_sdwan_admin_status"] = normalize_interface_status(attrs.get("admin_status"))
+        _interface.custom_field_data["catalyst_sdwan_oper_status"] = normalize_interface_status(attrs.get("oper_status"))
         
         # Add main tag if configured
         main_tag_name = PLUGIN_CFG.get("tag")
@@ -634,9 +651,9 @@ class NautobotInterface(Interface):
         if attrs.get("vpn_id"):
             _interface.custom_field_data["catalyst_sdwan_vpn_id"] = attrs["vpn_id"]
         if attrs.get("admin_status"):
-            _interface.custom_field_data["catalyst_sdwan_admin_status"] = attrs["admin_status"]
+            _interface.custom_field_data["catalyst_sdwan_admin_status"] = normalize_interface_status(attrs["admin_status"])
         if attrs.get("oper_status"):
-            _interface.custom_field_data["catalyst_sdwan_oper_status"] = attrs["oper_status"]
+            _interface.custom_field_data["catalyst_sdwan_oper_status"] = normalize_interface_status(attrs["oper_status"])
             # Update status using improved logic with proper null checking
             oper_status_raw = attrs["oper_status"]
             admin_status_raw = attrs.get("admin_status")
