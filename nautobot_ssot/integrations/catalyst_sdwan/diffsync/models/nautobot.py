@@ -33,6 +33,15 @@ from nautobot_ssot.integrations.catalyst_sdwan.diffsync.models.base import (
 logger = logging.getLogger(__name__)
 
 
+def get_tag_if_exists(tag_name):
+    """Safely get a tag by name, return None if it doesn't exist."""
+    try:
+        return Tag.objects.get(name=tag_name)
+    except Tag.DoesNotExist:
+        logger.warning(f"Tag '{tag_name}' not found - it should have been created by signals")
+        return None
+
+
 class NautobotTenant(Tenant):
     """Nautobot implementation of the Tenant Model."""
 
@@ -44,22 +53,26 @@ class NautobotTenant(Tenant):
         # Add main tag if configured
         main_tag_name = PLUGIN_CFG.get("tag")
         if main_tag_name:
-            try:
-                main_tag = Tag.objects.get(name=main_tag_name)
+            main_tag = get_tag_if_exists(main_tag_name)
+            if main_tag:
                 _tenant.tags.add(main_tag)
-            except Tag.DoesNotExist:
-                # Log warning but don't fail - tag will be created by signals
-                pass
         
         # Add site-specific tag
         site_tag_name = attrs["site_tag"]
         if site_tag_name:
-            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-            _tenant.tags.add(site_tag)
+            site_tag = get_tag_if_exists(site_tag_name)
+            if site_tag:
+                _tenant.tags.add(site_tag)
             
         _tenant.validated_save()
 
-        Namespace.objects.create(name=ids["name"])
+        # Create namespace for the tenant if it doesn't exist
+        try:
+            Namespace.objects.get(name=ids["name"])
+        except Namespace.DoesNotExist:
+            adapter.job.logger.info(f"Creating namespace for tenant: {ids['name']}")
+            Namespace.objects.create(name=ids["name"])
+        
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
     def update(self, attrs):
@@ -99,18 +112,16 @@ class NautobotVrf(Vrf):
         # Add main tag if configured
         main_tag_name = PLUGIN_CFG.get("tag")
         if main_tag_name:
-            try:
-                main_tag = Tag.objects.get(name=main_tag_name)
+            main_tag = get_tag_if_exists(main_tag_name)
+            if main_tag:
                 _vrf.tags.add(main_tag)
-            except Tag.DoesNotExist:
-                # Log warning but don't fail - tag will be created by signals
-                pass
         
         # Add site-specific tag
         site_tag_name = attrs["site_tag"]
         if site_tag_name:
-            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-            _vrf.tags.add(site_tag)
+            site_tag = get_tag_if_exists(site_tag_name)
+            if site_tag:
+                _vrf.tags.add(site_tag)
             
         _vrf.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
@@ -162,11 +173,9 @@ class NautobotDeviceType(DeviceType):
                 # Add main tag if configured and exists
                 main_tag_name = PLUGIN_CFG.get("tag")
                 if main_tag_name:
-                    try:
-                        main_tag = Tag.objects.get(name=main_tag_name)
+                    main_tag = get_tag_if_exists(main_tag_name)
+                    if main_tag:
                         existing_device_type.tags.add(main_tag)
-                    except Tag.DoesNotExist:
-                        adapter.job.logger.warning(f"Tag {main_tag_name} does not exist for DeviceType {ids['model']}")
                 
                 existing_device_type.validated_save()
                 return super().create(ids=ids, adapter=adapter, attrs=attrs)
@@ -183,11 +192,9 @@ class NautobotDeviceType(DeviceType):
             # Add main tag if configured and exists
             main_tag_name = PLUGIN_CFG.get("tag")
             if main_tag_name:
-                try:
-                    main_tag = Tag.objects.get(name=main_tag_name)
+                main_tag = get_tag_if_exists(main_tag_name)
+                if main_tag:
                     _devicetype.tags.add(main_tag)
-                except Tag.DoesNotExist:
-                    adapter.job.logger.warning(f"Tag {main_tag_name} does not exist for DeviceType {ids['model']}")
             
             _devicetype.validated_save()
             return super().create(ids=ids, adapter=adapter, attrs=attrs)
@@ -225,20 +232,13 @@ class NautobotDeviceRole(DeviceRole):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create DeviceRole object in Nautobot."""
-        # Use get_or_create to handle existing roles
-        _devicerole, created = Role.objects.get_or_create(
-            name=ids["name"],
-            defaults={"description": attrs["description"]}
-        )
-        
-        if created:
-            adapter.job.logger.info(f"Created new device role: {ids['name']}")
-        else:
+        # The role should already exist from signals
+        try:
+            _devicerole = Role.objects.get(name=ids["name"])
             adapter.job.logger.info(f"Using existing device role: {ids['name']}")
-            # Update description if the role already exists
-            if attrs.get("description") and _devicerole.description != attrs["description"]:
-                _devicerole.description = attrs["description"]
-                _devicerole.validated_save()
+        except Role.DoesNotExist:
+            adapter.job.logger.error(f"Device role {ids['name']} not found - it should have been created by signals")
+            raise
         
         # Ensure this role can be applied to devices
         device_content_type = ContentType.objects.get_for_model(OrmDevice)
@@ -284,40 +284,24 @@ class NautobotDevice(Device):
         try:
             location = Location.objects.get(name=ids["site"], location_type=location_type)
         except Location.DoesNotExist:
-            # Create the location if it doesn't exist
-            adapter.job.logger.info(f"Creating missing location: {ids['site']} of type {location_type.name}")
-            location = Location.objects.create(
-                name=ids["site"],
-                location_type=location_type,
-                status=Status.objects.get(name="Active"),  # Use Active status for new locations
+            # Log error if location doesn't exist - locations should be created outside the job
+            adapter.job.logger.error(
+                f"Location '{ids['site']}' of type '{location_type.name}' not found. "
+                f"Please create this location before running the sync job."
             )
-            
-            # Add tags to the new location
-            main_tag_name = PLUGIN_CFG.get("tag")
-            if main_tag_name:
-                try:
-                    main_tag = Tag.objects.get(name=main_tag_name)
-                    location.tags.add(main_tag)
-                except Tag.DoesNotExist:
-                    pass  # Tag will be created by signals
-            
-            # Add site-specific tag to location
-            site_tag_name = attrs["site_tag"]
-            if site_tag_name:
-                site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-                location.tags.add(site_tag)
+            raise
         
-        # Get or create controller managed device group if specified
+        # Get controller managed device group if specified
         controller_group = None
         if attrs.get("controller_group"):
             try:
                 controller_group = ControllerManagedDeviceGroup.objects.get(name=attrs["controller_group"])
             except ControllerManagedDeviceGroup.DoesNotExist:
-                adapter.job.logger.info(f"Creating missing controller group: {attrs['controller_group']}")
-                controller_group = ControllerManagedDeviceGroup.objects.create(
-                    name=attrs["controller_group"],
-                    controller=adapter.job.vmanage if hasattr(adapter.job, 'vmanage') else None,
+                adapter.job.logger.warning(
+                    f"Controller group '{attrs['controller_group']}' not found. "
+                    f"Device will be created without controller group assignment."
                 )
+                controller_group = None
         
         # Check if device already exists and handle accordingly
         try:
@@ -344,16 +328,15 @@ class NautobotDevice(Device):
             # Add tags
             main_tag_name = PLUGIN_CFG.get("tag")
             if main_tag_name:
-                try:
-                    main_tag = Tag.objects.get(name=main_tag_name)
+                main_tag = get_tag_if_exists(main_tag_name)
+                if main_tag:
                     existing_device.tags.add(main_tag)
-                except Tag.DoesNotExist:
-                    pass
             
             site_tag_name = attrs["site_tag"]
             if site_tag_name:
-                site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-                existing_device.tags.add(site_tag)
+                site_tag = get_tag_if_exists(site_tag_name)
+                if site_tag:
+                    existing_device.tags.add(site_tag)
             
             existing_device.validated_save()
             _device = existing_device
@@ -385,18 +368,16 @@ class NautobotDevice(Device):
             # Add main tag if configured
             main_tag_name = PLUGIN_CFG.get("tag")
             if main_tag_name:
-                try:
-                    main_tag = Tag.objects.get(name=main_tag_name)
+                main_tag = get_tag_if_exists(main_tag_name)
+                if main_tag:
                     _device.tags.add(main_tag)
-                except Tag.DoesNotExist:
-                    # Log warning but don't fail - tag will be created by signals
-                    pass
             
             # Add site-specific tag
             site_tag_name = attrs["site_tag"]
             if site_tag_name:
-                site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-                _device.tags.add(site_tag)
+                site_tag = get_tag_if_exists(site_tag_name)
+                if site_tag:
+                    _device.tags.add(site_tag)
                 
             _device.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
@@ -565,18 +546,16 @@ class NautobotInterface(Interface):
         # Add main tag if configured
         main_tag_name = PLUGIN_CFG.get("tag")
         if main_tag_name:
-            try:
-                main_tag = Tag.objects.get(name=main_tag_name)
+            main_tag = get_tag_if_exists(main_tag_name)
+            if main_tag:
                 _interface.tags.add(main_tag)
-            except Tag.DoesNotExist:
-                # Log warning but don't fail - tag will be created by signals
-                pass
         
         # Add site-specific tag
         site_tag_name = attrs["site_tag"]
         if site_tag_name:
-            site_tag, _ = Tag.objects.get_or_create(name=site_tag_name)
-            _interface.tags.add(site_tag)
+            site_tag = get_tag_if_exists(site_tag_name)
+            if site_tag:
+                _interface.tags.add(site_tag)
             
         _interface.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
