@@ -47,7 +47,13 @@ def get_device_type_definition(model_name):
 
 def normalize_interface_name(interface_name):
     """Normalize interface names to consistent format."""
-    # Convert common variations to standard format
+    # If interface name is already in full format, return as-is
+    full_formats = ["GigabitEthernet", "TenGigabitEthernet", "FastEthernet", "Ethernet", "Management", "Loopback", "Tunnel"]
+    for full_format in full_formats:
+        if interface_name.startswith(full_format):
+            return interface_name
+    
+    # Convert common short variations to standard format
     name_mappings = {
         "ge": "GigabitEthernet",
         "gi": "GigabitEthernet", 
@@ -57,11 +63,16 @@ def normalize_interface_name(interface_name):
         "mgmt": "Management",
     }
     
+    # Check for short name patterns and expand them
+    interface_lower = interface_name.lower()
     for short_name, full_name in name_mappings.items():
-        if interface_name.lower().startswith(short_name):
-            # Extract the number part
-            number_part = interface_name[len(short_name):]
-            return f"{full_name}{number_part}"
+        # Only match if the interface name starts with the short name followed by a digit or slash
+        if interface_lower.startswith(short_name) and len(interface_name) > len(short_name):
+            next_char = interface_name[len(short_name)]
+            if next_char.isdigit() or next_char in ['/', '-', ':']:
+                # Extract the number/identifier part
+                number_part = interface_name[len(short_name):]
+                return f"{full_name}{number_part}"
     
     return interface_name
 
