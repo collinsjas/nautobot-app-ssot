@@ -537,6 +537,8 @@ class NautobotInterface(Interface):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Interface object in Nautobot."""
+        adapter.job.logger.debug(f"Starting Interface creation for device: {ids.get('device__name')}, interface: {ids.get('name')}")
+        
         # Validate MTU - must be >= 1 or None for Django validation
         mtu_value = attrs.get("mtu")
         if mtu_value is not None:
@@ -581,9 +583,9 @@ class NautobotInterface(Interface):
             f"-> {interface_status}"
         )
         
-        _interface = OrmInterface(
-            name=ids["name"],
-            device=OrmDevice.objects.get(
+        # Get the device for this interface
+        try:
+            device = OrmDevice.objects.get(
                 name=ids["device"],
                 location=Location.objects.get(
                     name=ids["site"],
@@ -591,12 +593,43 @@ class NautobotInterface(Interface):
                     if adapter.job.device_site
                     else adapter.job.vmanage.location.location_type,
                 ),
-            ),
-            description=attrs["description"],
-            status=Status.objects.get(name=interface_status),
-            type=attrs["type"],
-            mtu=mtu_value,
-        )
+            )
+        except OrmDevice.DoesNotExist:
+            adapter.job.logger.error(f"Device {ids['device']} not found at location {ids['site']}")
+            raise
+        
+        # Check if interface already exists
+        try:
+            _interface = OrmInterface.objects.get(device=device, name=ids["name"])
+            adapter.job.logger.info(f"Interface '{ids['name']}' already exists on device '{ids['device']}', updating it")
+            
+            # Update existing interface
+            _interface.description = attrs["description"]
+            _interface.status = Status.objects.get(name=interface_status)
+            _interface.type = attrs["type"]
+            _interface.mtu = mtu_value
+            
+            # Save updated interface immediately
+            try:
+                _interface.validated_save()
+                adapter.job.logger.debug(f"Successfully updated existing interface: {ids['name']} on device {ids['device']}")
+            except Exception as e:
+                adapter.job.logger.error(
+                    f"Failed to update existing interface '{ids['name']}' on device '{ids['device']}': {e}"
+                )
+                raise
+            
+        except OrmInterface.DoesNotExist:
+            # Create new interface
+            adapter.job.logger.info(f"Creating new interface: {ids['name']} on device {ids['device']}")
+            _interface = OrmInterface(
+                name=ids["name"],
+                device=device,
+                description=attrs["description"],
+                status=Status.objects.get(name=interface_status),
+                type=attrs["type"],
+                mtu=mtu_value,
+            )
         
         # Add SD-WAN specific custom fields with normalized status values
         _interface.custom_field_data["catalyst_sdwan_vpn_id"] = attrs.get("vpn_id")
@@ -616,8 +649,29 @@ class NautobotInterface(Interface):
             site_tag = get_tag_if_exists(site_tag_name)
             if site_tag:
                 _interface.tags.add(site_tag)
+        
+        # Save with detailed error handling (only for new interfaces)
+        # Existing interfaces were already saved above after update
+        if not hasattr(_interface, 'pk') or _interface.pk is None:
+            try:
+                _interface.validated_save()
+                adapter.job.logger.debug(f"Successfully created new interface: {ids['name']} on device {ids['device']}")
+            except Exception as e:
+                adapter.job.logger.error(
+                    f"Failed to save new interface '{ids['name']}' on device '{ids['device']}' at location '{ids['site']}': {e}"
+                )
+                raise
+        else:
+            # For existing interfaces, just save the custom fields and tags
+            try:
+                _interface.save()
+                adapter.job.logger.debug(f"Successfully updated custom fields for existing interface: {ids['name']} on device {ids['device']}")
+            except Exception as e:
+                adapter.job.logger.error(
+                    f"Failed to save custom fields for existing interface '{ids['name']}' on device '{ids['device']}': {e}"
+                )
+                raise
             
-        _interface.validated_save()
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
     def update(self, attrs):
