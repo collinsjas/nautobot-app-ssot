@@ -61,48 +61,49 @@ class NautobotAdapter(Adapter):
         }
 
     def load_tenants(self):
-        """Load Tenants from Nautobot that are tagged with SD-WAN."""
+        """Load only Tenants that are actually needed for this sync operation."""
+        # Skip loading tenants if not needed for this sync
+        if not hasattr(self.job, 'tenant_objects_needed') or not self.job.tenant_objects_needed:
+            self.job.logger.info("Skipping tenant loading - not needed for this sync operation")
+            return
+            
         try:
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            site_tag = get_tag_if_exists(self.site_name)
-            
-            # Build tag filter - only include tags that exist
-            tags_to_filter = [tag for tag in [main_tag, site_tag] if tag is not None]
-            
-            if tags_to_filter:
-                tenants = Tenant.objects.filter(tags__in=tags_to_filter).distinct()
-            else:
-                # If no tags exist, load tenants by name pattern instead
-                tenants = Tenant.objects.filter(name__startswith=f"{PLUGIN_CFG.get('tenant_prefix', 'Catalyst-SDWAN')}:")
+            # Only load specific tenants that will be referenced in the sync
+            tenant_names = getattr(self.job, 'required_tenant_names', [])
+            if not tenant_names:
+                self.job.logger.info("No specific tenants required for sync")
+                return
+                
+            tenants = Tenant.objects.filter(name__in=tenant_names)
             
             for tenant in tenants:
-                tenant_name = tenant.name
-                # Only load tenants that match our naming pattern
-                if tenant_name.startswith(f"{PLUGIN_CFG.get('tenant_prefix', 'Catalyst-SDWAN')}:"):
-                    new_tenant = self.tenant(
-                        name=tenant_name,
-                        description=tenant.description or "",
-                        comments=tenant.comments or "",
-                        site_tag=self.site_name,
-                    )
-                    self.add(new_tenant)
+                new_tenant = self.tenant(
+                    name=tenant.name,
+                    description=tenant.description or "",
+                    comments=tenant.comments or "",
+                    site_tag=self.site_name,
+                )
+                self.add(new_tenant)
+                
+            self.job.logger.info(f"Loaded {len(tenants)} required tenants")
         except Exception as e:
             self.job.logger.warning(f"Error loading tenants: {e}")
 
     def load_vrfs(self):
-        """Load VRFs from Nautobot that are tagged with SD-WAN."""
+        """Load only VRFs that are actually needed for this sync operation."""
+        # Skip loading VRFs if not needed for this sync
+        if not hasattr(self.job, 'vrf_objects_needed') or not self.job.vrf_objects_needed:
+            self.job.logger.info("Skipping VRF loading - not needed for this sync operation")
+            return
+            
         try:
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            site_tag = get_tag_if_exists(self.site_name)
-            
-            # Build tag filter - only include tags that exist
-            tags_to_filter = [tag for tag in [main_tag, site_tag] if tag is not None]
-            
-            if tags_to_filter:
-                vrfs = VRF.objects.filter(tags__in=tags_to_filter).distinct()
-            else:
-                # If no tags exist, load all VRFs (or add other filtering logic)
-                vrfs = VRF.objects.all()
+            # Only load specific VRFs that will be referenced in the sync
+            vrf_names = getattr(self.job, 'required_vrf_names', [])
+            if not vrf_names:
+                self.job.logger.info("No specific VRFs required for sync")
+                return
+                
+            vrfs = VRF.objects.filter(name__in=vrf_names)
             
             for vrf in vrfs:
                 new_vrf = self.vrf(
@@ -114,69 +115,23 @@ class NautobotAdapter(Adapter):
                     rd=vrf.rd or "",
                 )
                 self.add(new_vrf)
+                
+            self.job.logger.info(f"Loaded {len(vrfs)} required VRFs")
         except Exception as e:
             self.job.logger.warning(f"Error loading VRFs: {e}")
 
     def load_device_types(self):
-        """Load Device Types from Nautobot that are related to SD-WAN."""
+        """Load only Device Types that are actually in use by devices being synced."""
         try:
-            # Load device types that are used by SD-WAN devices only
-            # This prevents loading unrelated device types that would be deleted
-            device_types_in_use = set()
+            # Only load device types for devices we're actually syncing
+            device_type_models = getattr(self.job, 'required_device_type_models', [])
+            if not device_type_models:
+                self.job.logger.info("No device types required - will be determined from SD-WAN data")
+                return
             
-            # Get device types used by SD-WAN devices in our target locations
-            devices_query = Device.objects.filter(
-                location__in=Location.objects.filter(
-                    name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
-                ).exclude(name=None)
-            )
+            device_types = DeviceType.objects.filter(model__in=device_type_models)
             
-            # Filter to only SD-WAN devices using the same criteria as load_devices
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            site_tag = get_tag_if_exists(self.site_name)
-            
-            for device in devices_query:
-                is_sdwan_device = False
-                
-                # Check if device has SD-WAN tags (highest priority)
-                if main_tag and device.tags.filter(id=main_tag.id).exists():
-                    is_sdwan_device = True
-                elif site_tag and device.tags.filter(id=site_tag.id).exists():
-                    is_sdwan_device = True
-                # Check if device has SD-WAN custom fields populated (high priority)
-                elif device.custom_field_data.get("catalyst_sdwan_system_ip"):
-                    is_sdwan_device = True
-                elif device.custom_field_data.get("catalyst_sdwan_site_id"):
-                    is_sdwan_device = True
-                elif device.custom_field_data.get("catalyst_sdwan_uuid"):
-                    is_sdwan_device = True
-                # Only use device model detection as a last resort and be very specific
-                elif device.device_type:
-                    model = device.device_type.model.lower()
-                    manufacturer = device.device_type.manufacturer.name
-                    # Be very specific about SD-WAN models to avoid false positives
-                    if manufacturer == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
-                        # Only include very specific SD-WAN models to avoid catching regular routers
-                        if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111']):
-                            is_sdwan_device = True
-                
-                if is_sdwan_device and device.device_type:
-                    device_types_in_use.add(device.device_type.id)
-                    self.job.logger.debug(f"Device type '{device.device_type.model}' in use by SD-WAN device '{device.name}'")
-            
-            # Also check for device types tagged with SD-WAN
-            if main_tag:
-                tagged_device_types = DeviceType.objects.filter(tags=main_tag)
-                for dt in tagged_device_types:
-                    device_types_in_use.add(dt.id)
-                    self.job.logger.debug(f"Device type '{dt.model}' tagged with SD-WAN tag")
-            
-            # Load only the device types we identified
-            device_types = DeviceType.objects.filter(id__in=device_types_in_use)
-            
-            self.job.logger.info(f"Loading {len(device_types)} SD-WAN device types")
-            for device_type in device_types:
-                self.job.logger.debug(f"Loading device type: {device_type.model} (manufacturer: {device_type.manufacturer.name})")
+            self.job.logger.info(f"Loading {len(device_types)} required device types")
             
             for device_type in device_types:
                 # Ensure part_nbr consistency - use model name if part_number is empty
@@ -194,65 +149,17 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading device types: {e}")
 
     def load_device_roles(self):
-        """Load Device Roles from Nautobot that are related to SD-WAN."""
+        """Load only Device Roles that are actually in use by devices being synced."""
         try:
-            # Load device roles that are used by SD-WAN devices only
-            # This prevents loading unrelated device roles that would be deleted
-            device_roles_in_use = set()
+            # Only load device roles for devices we're actually syncing
+            device_role_names = getattr(self.job, 'required_device_role_names', [])
+            if not device_role_names:
+                self.job.logger.info("No device roles required - will be determined from SD-WAN data")
+                return
             
-            # Get device roles used by SD-WAN devices in our target locations
-            devices_query = Device.objects.filter(
-                location__in=Location.objects.filter(
-                    name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
-                ).exclude(name=None)
-            )
+            device_roles = Role.objects.filter(name__in=device_role_names, content_types__model='device')
             
-            # Filter to only SD-WAN devices using the same criteria as load_devices
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            site_tag = get_tag_if_exists(self.site_name)
-            
-            for device in devices_query:
-                is_sdwan_device = False
-                
-                # Check if device has SD-WAN tags (highest priority)
-                if main_tag and device.tags.filter(id=main_tag.id).exists():
-                    is_sdwan_device = True
-                elif site_tag and device.tags.filter(id=site_tag.id).exists():
-                    is_sdwan_device = True
-                # Check if device has SD-WAN custom fields populated (high priority)
-                elif device.custom_field_data.get("catalyst_sdwan_system_ip"):
-                    is_sdwan_device = True
-                elif device.custom_field_data.get("catalyst_sdwan_site_id"):
-                    is_sdwan_device = True
-                elif device.custom_field_data.get("catalyst_sdwan_uuid"):
-                    is_sdwan_device = True
-                # Only use device model detection as a last resort and be very specific
-                elif device.device_type:
-                    model = device.device_type.model.lower()
-                    manufacturer = device.device_type.manufacturer.name
-                    # Be very specific about SD-WAN models to avoid false positives
-                    if manufacturer == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
-                        # Only include very specific SD-WAN models to avoid catching regular routers
-                        if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111']):
-                            is_sdwan_device = True
-                
-                if is_sdwan_device and device.role:
-                    device_roles_in_use.add(device.role.id)
-                    self.job.logger.debug(f"Device role '{device.role.name}' in use by SD-WAN device '{device.name}'")
-            
-            # Also check for device roles tagged with SD-WAN
-            if main_tag:
-                tagged_roles = Role.objects.filter(tags=main_tag, content_types__model='device')
-                for role in tagged_roles:
-                    device_roles_in_use.add(role.id)
-                    self.job.logger.debug(f"Device role '{role.name}' tagged with SD-WAN tag")
-            
-            # Load only the device roles we identified
-            device_roles = Role.objects.filter(id__in=device_roles_in_use, content_types__model='device')
-            
-            self.job.logger.info(f"Loading {len(device_roles)} SD-WAN device roles")
-            for role in device_roles:
-                self.job.logger.debug(f"Loading device role: {role.name}")
+            self.job.logger.info(f"Loading {len(device_roles)} required device roles")
             
             for role in device_roles:
                 new_device_role = self.device_role(
@@ -264,68 +171,20 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading device roles: {e}")
 
     def load_devices(self):
-        """Load SD-WAN Devices from target locations."""
+        """Load only devices that exist in the target location."""
         try:
-            # Load devices from target locations, but only those that are SD-WAN related
-            # This prevents loading non-SD-WAN devices that would cause unwanted deletions
-            devices_query = Device.objects.filter(
-                location__in=Location.objects.filter(
-                    name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
-                ).exclude(name=None)
-            )
+            # Only load devices from the specific target location
+            target_location = self.site_name
+            if not target_location:
+                self.job.logger.warning("No target location specified - no devices to load")
+                return
             
-            # Filter to only SD-WAN devices using multiple criteria
-            sdwan_devices = []
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            site_tag = get_tag_if_exists(self.site_name)
+            # Load devices only from the target location
+            devices = Device.objects.filter(location__name=target_location)
             
-            self.job.logger.info(f"Evaluating {len(devices_query)} devices in target locations for SD-WAN criteria")
+            self.job.logger.info(f"Loading {len(devices)} devices from location: {target_location}")
             
-            for device in devices_query:
-                is_sdwan_device = False
-                reason = ""
-                
-                # Check if device has SD-WAN tags (highest priority)
-                if main_tag and device.tags.filter(id=main_tag.id).exists():
-                    is_sdwan_device = True
-                    reason = f"has main SD-WAN tag '{main_tag.name}'"
-                elif site_tag and device.tags.filter(id=site_tag.id).exists():
-                    is_sdwan_device = True
-                    reason = f"has site tag '{site_tag.name}'"
-                # Check if device has SD-WAN custom fields populated (high priority)
-                elif device.custom_field_data.get("catalyst_sdwan_system_ip"):
-                    is_sdwan_device = True
-                    reason = f"has catalyst_sdwan_system_ip: {device.custom_field_data.get('catalyst_sdwan_system_ip')}"
-                elif device.custom_field_data.get("catalyst_sdwan_site_id"):
-                    is_sdwan_device = True
-                    reason = f"has catalyst_sdwan_site_id: {device.custom_field_data.get('catalyst_sdwan_site_id')}"
-                elif device.custom_field_data.get("catalyst_sdwan_uuid"):
-                    is_sdwan_device = True
-                    reason = f"has catalyst_sdwan_uuid: {device.custom_field_data.get('catalyst_sdwan_uuid')}"
-                # Only use device model detection as a last resort and be very specific
-                elif device.device_type:
-                    model = device.device_type.model.lower()
-                    manufacturer = device.device_type.manufacturer.name
-                    # Be very specific about SD-WAN models to avoid false positives
-                    if manufacturer == PLUGIN_CFG.get("manufacturer_name", "Cisco"):
-                        # Only include very specific SD-WAN models to avoid catching regular routers
-                        if any(sdwan_model in model for sdwan_model in ['vedge', 'c8200', 'c1111']):
-                            is_sdwan_device = True
-                            reason = f"device model '{device.device_type.model}' matches SD-WAN pattern"
-                        else:
-                            self.job.logger.debug(f"Device {device.name}: Cisco device but model '{device.device_type.model}' not recognized as SD-WAN")
-                    else:
-                        self.job.logger.debug(f"Device {device.name}: manufacturer '{manufacturer}' is not {PLUGIN_CFG.get('manufacturer_name', 'Cisco')}")
-                
-                if is_sdwan_device:
-                    sdwan_devices.append(device)
-                    self.job.logger.info(f"Including SD-WAN device: {device.name} at {device.location.name} - {reason}")
-                else:
-                    self.job.logger.info(f"Excluding non-SD-WAN device: {device.name} at {device.location.name}")
-            
-            self.job.logger.info(f"Loading {len(sdwan_devices)} SD-WAN devices from {len(devices_query)} total devices in target locations")
-            
-            for device in sdwan_devices:
+            for device in devices:
                 new_device = self.device(
                     name=device.name,
                     device_type=device.device_type.model,
@@ -349,36 +208,22 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading devices: {e}")
 
     def load_interface_templates(self):
-        """Load Interface Templates from Nautobot that are related to SD-WAN."""
+        """Load only Interface Templates for device types that are actually being synced."""
+        # Skip loading interface templates unless specifically needed
+        if not hasattr(self.job, 'interface_template_objects_needed') or not self.job.interface_template_objects_needed:
+            self.job.logger.info("Skipping interface template loading - not needed for this sync operation")
+            return
+            
         try:
-            # Load interface templates that belong to device types we're managing
-            # This prevents loading unrelated interface templates that would be deleted
-            interface_templates_in_use = set()
+            # Only load interface templates for device types we're working with
+            device_type_models = getattr(self.job, 'required_device_type_models', [])
+            if not device_type_models:
+                self.job.logger.info("No device types specified - skipping interface template loading")
+                return
             
-            # Get device types used by devices in our target locations
-            devices_in_locations = Device.objects.filter(
-                location__name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
-            ).exclude(location__name=None)
+            interface_templates = InterfaceTemplate.objects.filter(device_type__model__in=device_type_models)
             
-            device_type_ids = set()
-            for device in devices_in_locations:
-                if device.device_type:
-                    device_type_ids.add(device.device_type.id)
-            
-            # Also check for device types tagged with SD-WAN
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            if main_tag:
-                tagged_device_types = DeviceType.objects.filter(tags=main_tag)
-                for dt in tagged_device_types:
-                    device_type_ids.add(dt.id)
-            
-            # Get interface templates for these device types or tagged templates
-            interface_templates = InterfaceTemplate.objects.filter(device_type_id__in=device_type_ids)
-            
-            # Also include interface templates tagged with SD-WAN
-            if main_tag:
-                tagged_templates = InterfaceTemplate.objects.filter(tags=main_tag)
-                interface_templates = interface_templates.union(tagged_templates)
+            self.job.logger.info(f"Loading {len(interface_templates)} interface templates for required device types")
             
             for interface_template in interface_templates:
                 new_interface_template = self.interface_template(
@@ -393,21 +238,17 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading interface templates: {e}")
 
     def load_interfaces(self):
-        """Load Interfaces from Nautobot that are tagged with SD-WAN."""
+        """Load only Interfaces from devices that are actually being synced."""
         try:
-            main_tag = get_tag_if_exists(PLUGIN_CFG.get("tag"))
-            site_tag = get_tag_if_exists(self.site_name)
+            # Only load interfaces from devices in the target location
+            target_location = self.site_name
+            if not target_location:
+                self.job.logger.warning("No target location specified - no interfaces to load")
+                return
             
-            # Build tag filter - only include tags that exist
-            tags_to_filter = [tag for tag in [main_tag, site_tag] if tag is not None]
+            interfaces = Interface.objects.filter(device__location__name=target_location)
             
-            if tags_to_filter:
-                interfaces = Interface.objects.filter(tags__in=tags_to_filter).distinct()
-            else:
-                # If no tags exist, load interfaces from devices in our locations
-                interfaces = Interface.objects.filter(
-                    device__location__name__in=[self.site_name, self.job.device_site.name if self.job.device_site else None]
-                ).exclude(device__location__name=None)
+            self.job.logger.info(f"Loading {len(interfaces)} interfaces from devices in location: {target_location}")
             
             for interface in interfaces:
                 new_interface = self.interface(
@@ -420,7 +261,7 @@ class NautobotAdapter(Adapter):
                     admin_status=interface.custom_field_data.get("catalyst_sdwan_admin_status"),
                     oper_status=interface.custom_field_data.get("catalyst_sdwan_oper_status"),
                     vpn_id=interface.custom_field_data.get("catalyst_sdwan_vpn_id"),
-                    ip_address="",  # Will be populated separately
+                    ip_address="",  # Will be populated separately if needed
                     mtu=interface.mtu,
                 )
                 self.add(new_interface)
@@ -428,11 +269,24 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading interfaces: {e}")
 
     def load(self):
-        """Load all data from Nautobot."""
-        self.load_tenants()
-        self.load_vrfs()
+        """Load only the data that's actually needed for this sync operation."""
+        self.job.logger.info(f"Starting optimized load for site: {self.site_name}")
+        
+        # Only load what's needed - most objects will be created by the source adapter
+        # The Nautobot adapter mainly needs existing objects to avoid duplicates
+        
+        # Load devices first as they're the core objects
+        self.load_devices()
+        
+        # Load interfaces for the devices we loaded
+        self.load_interfaces()
+        
+        # Only load supporting objects if they're actually needed
+        # These will typically be skipped since objects are created by signals/source
         self.load_device_types()
         self.load_device_roles()
-        self.load_devices()
+        self.load_tenants()
+        self.load_vrfs()
         self.load_interface_templates()
-        self.load_interfaces()
+        
+        self.job.logger.info(f"Optimized load complete - loaded only required objects for site: {self.site_name}")
