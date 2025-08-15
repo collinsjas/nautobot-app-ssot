@@ -48,7 +48,18 @@ class NautobotTenant(Tenant):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Tenant object in Nautobot."""
-        _tenant = OrmTenant(name=ids["name"], description=attrs["description"], comments=attrs["comments"])
+        # Check if tenant already exists
+        try:
+            _tenant = OrmTenant.objects.get(name=ids["name"])
+            adapter.job.logger.info(f"Tenant '{ids['name']}' already exists, updating it")
+            
+            # Update existing tenant
+            _tenant.description = attrs["description"]
+            _tenant.comments = attrs["comments"]
+        except OrmTenant.DoesNotExist:
+            # Create new tenant
+            adapter.job.logger.info(f"Creating new tenant: {ids['name']}")
+            _tenant = OrmTenant(name=ids["name"], description=attrs["description"], comments=attrs["comments"])
         
         # Add main tag if configured
         main_tag_name = PLUGIN_CFG.get("tag")
@@ -102,12 +113,24 @@ class NautobotVrf(Vrf):
     def create(cls, adapter, ids, attrs):
         """Create VRF object in Nautobot."""
         _tenant = OrmTenant.objects.get(name=ids["tenant"])
-        _vrf = OrmVrf(
-            name=ids["name"], 
-            tenant=_tenant, 
-            namespace=Namespace.objects.get(name=attrs["namespace"]),
-            rd=attrs.get("rd")
-        )
+        _namespace = Namespace.objects.get(name=attrs["namespace"])
+        
+        # Check if VRF already exists
+        try:
+            _vrf = OrmVrf.objects.get(name=ids["name"], tenant=_tenant, namespace=_namespace)
+            adapter.job.logger.info(f"VRF '{ids['name']}' already exists, updating it")
+            
+            # Update existing VRF
+            _vrf.rd = attrs.get("rd")
+        except OrmVrf.DoesNotExist:
+            # Create new VRF
+            adapter.job.logger.info(f"Creating new VRF: {ids['name']}")
+            _vrf = OrmVrf(
+                name=ids["name"], 
+                tenant=_tenant, 
+                namespace=_namespace,
+                rd=attrs.get("rd")
+            )
         
         # Add main tag if configured
         main_tag_name = PLUGIN_CFG.get("tag")
@@ -440,14 +463,30 @@ class NautobotInterfaceTemplate(InterfaceTemplate):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create InterfaceTemplate object in Nautobot."""
-        _interfacetemplate = OrmInterfaceTemplate(
-            device_type=OrmDeviceType.objects.get(model=ids["device_type"]),
-            name=ids["name"],
-            type=ids["type"],
-            mgmt_only=attrs["mgmt_only"],
-        )
+        device_type = OrmDeviceType.objects.get(model=ids["device_type"])
+        
+        # Check if interface template already exists
+        try:
+            _interfacetemplate = OrmInterfaceTemplate.objects.get(
+                device_type=device_type,
+                name=ids["name"]
+            )
+            adapter.job.logger.info(f"InterfaceTemplate '{ids['name']}' already exists, updating it")
+            
+            # Update existing interface template
+            _interfacetemplate.type = ids["type"]
+            _interfacetemplate.mgmt_only = attrs["mgmt_only"]
+        except OrmInterfaceTemplate.DoesNotExist:
+            # Create new interface template
+            adapter.job.logger.info(f"Creating new InterfaceTemplate: {ids['name']}")
+            _interfacetemplate = OrmInterfaceTemplate(
+                device_type=device_type,
+                name=ids["name"],
+                type=ids["type"],
+                mgmt_only=attrs["mgmt_only"],
+            )
+        
         _interfacetemplate.validated_save()
-
         return super().create(ids=ids, adapter=adapter, attrs=attrs)
 
     def update(self, attrs):
