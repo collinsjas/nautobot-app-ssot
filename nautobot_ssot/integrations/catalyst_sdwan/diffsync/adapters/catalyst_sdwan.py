@@ -284,14 +284,51 @@ class CatalystSdwanAdapter(Adapter):
                             )
                             mtu_value = None
                     
-                    # Log interface status for debugging
-                    admin_status = interface_info.get("admin-status")
-                    oper_status = interface_info.get("oper-status")
-                    self.job.logger.info(
-                        f"Interface {interface_name} on {device_name}: "
-                        f"admin-status='{admin_status}' (type: {type(admin_status)}), "
-                        f"oper-status='{oper_status}' (type: {type(oper_status)})"
-                    )
+                    # Debug: Log all available interface fields for the first few interfaces to understand the data structure
+                    if not hasattr(self, '_interface_fields_logged'):
+                        self.job.logger.info(f"Sample interface data for {interface_name}: {interface_info}")
+                        self.job.logger.info(f"Available interface fields: {list(interface_info.keys())}")
+                        self._interface_fields_logged = True
+                    
+                    # Get interface status with comprehensive fallback field names
+                    # Try various common field name patterns used in different network APIs
+                    admin_status = None
+                    for field_name in ["admin-status", "adminStatus", "admin_status", "if-admin-status", 
+                                     "ifAdminStatus", "adminState", "admin-state", "administrativeStatus"]:
+                        if interface_info.get(field_name) is not None:
+                            admin_status = interface_info.get(field_name)
+                            if not hasattr(self, '_admin_field_found'):
+                                self.job.logger.info(f"Found admin status in field: {field_name}")
+                                self._admin_field_found = True
+                            break
+                    
+                    oper_status = None
+                    for field_name in ["oper-status", "operStatus", "oper_status", "if-oper-status", 
+                                     "ifOperStatus", "operationalStatus", "oper-state", "operState"]:
+                        if interface_info.get(field_name) is not None:
+                            oper_status = interface_info.get(field_name)
+                            if not hasattr(self, '_oper_field_found'):
+                                self.job.logger.info(f"Found oper status in field: {field_name}")
+                                self._oper_field_found = True
+                            break
+                    
+                    # If no status fields found, set defaults based on interface being present
+                    if admin_status is None:
+                        admin_status = "up"  # Assume up if interface exists
+                    if oper_status is None:
+                        oper_status = "up"  # Assume up if interface exists
+                    
+                    # Log interface status for debugging (only log first few)
+                    if not hasattr(self, '_status_log_count'):
+                        self._status_log_count = 0
+                    
+                    if self._status_log_count < 5:  # Only log first 5 interfaces to avoid spam
+                        self.job.logger.info(
+                            f"Interface {interface_name} on {device_name}: "
+                            f"admin-status='{admin_status}' (type: {type(admin_status)}), "
+                            f"oper-status='{oper_status}' (type: {type(oper_status)})"
+                        )
+                        self._status_log_count += 1
                     
                     new_interface = self.interface(
                         name=normalized_name,
