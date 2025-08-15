@@ -162,9 +162,7 @@ def catalyst_sdwan_create_roles(apps, **kwargs):
         if device_content_type not in role.content_types.all():
             role.content_types.add(device_content_type)
         
-        # Tag the role with SD-WAN tag
-        if main_tag and main_tag not in role.tags.all():
-            role.tags.add(main_tag)
+        # Note: Roles don't support tags in Nautobot, so we skip tag assignment
         
         if created:
             logger.info(f"Created SD-WAN device role: {role_data['name']}")
@@ -216,9 +214,7 @@ def catalyst_sdwan_create_location_types(apps, **kwargs):
             }
         )
         
-        # Tag the location type with SD-WAN tag
-        if main_tag and main_tag not in location_type.tags.all():
-            location_type.tags.add(main_tag)
+        # Note: LocationTypes don't support tags in Nautobot, so we skip tag assignment
         
         if created:
             logger.info(f"Created SD-WAN location type: {location_type_data['name']}")
