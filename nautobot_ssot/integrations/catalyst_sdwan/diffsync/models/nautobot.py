@@ -42,6 +42,24 @@ def get_tag_if_exists(tag_name):
         return None
 
 
+def get_or_create_safe_to_delete_tag():
+    """Get or create the 'Safe to Delete' tag for marking objects that would be deleted."""
+    try:
+        tag, created = Tag.objects.get_or_create(
+            name="Safe to Delete",
+            defaults={
+                "description": "Objects marked by SD-WAN sync as candidates for deletion",
+                "color": "ff0000"  # Red color to make it visible
+            }
+        )
+        if created:
+            logger.info("Created 'Safe to Delete' tag for marking objects")
+        return tag
+    except Exception as e:
+        logger.error(f"Failed to create 'Safe to Delete' tag: {e}")
+        return None
+
+
 def normalize_interface_status(status_value):
     """Normalize interface status values to match custom field choices."""
     if not status_value:
@@ -112,14 +130,22 @@ class NautobotTenant(Tenant):
         return super().update(attrs)
 
     def delete(self):
-        """Delete Tenant object in Nautobot."""
-        self.adapter.job.logger.warning(f"Tenant {self.name} will be deleted.")
+        """Tag Tenant object as 'Safe to Delete' instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"Tenant {self.name} marked as 'Safe to Delete'")
         super().delete()
         try:
             _tenant = OrmTenant.objects.get(name=self.name)
-            self.adapter.objects_to_delete["tenant"].append(_tenant)
+            safe_delete_tag = get_or_create_safe_to_delete_tag()
+            if safe_delete_tag:
+                _tenant.tags.add(safe_delete_tag)
+                _tenant.save()
+                self.adapter.job.logger.info(f"Tagged tenant {self.name} as 'Safe to Delete'")
+            else:
+                self.adapter.job.logger.error(f"Could not create 'Safe to Delete' tag for tenant {self.name}")
         except OrmTenant.DoesNotExist:
-            self.adapter.job.logger.warning(f"Tenant {self.name} does not exist, skipping deletion.")
+            self.adapter.job.logger.warning(f"Tenant {self.name} does not exist, skipping deletion tagging.")
+        except Exception as e:
+            self.adapter.job.logger.error(f"Error tagging tenant {self.name} for deletion: {e}")
         return self
 
 
@@ -178,15 +204,23 @@ class NautobotVrf(Vrf):
         return super().update(attrs)
 
     def delete(self):
-        """Delete VRF object in Nautobot."""
-        self.adapter.job.logger.warning(f"VRF {self.name} will be deleted.")
+        """Tag VRF object as 'Safe to Delete' instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"VRF {self.name} marked as 'Safe to Delete'")
         super().delete()
         try:
             _tenant = OrmTenant.objects.get(name=self.tenant)
             _vrf = OrmVrf.objects.get(name=self.name, tenant=_tenant)
-            self.adapter.objects_to_delete["vrf"].append(_vrf)
+            safe_delete_tag = get_or_create_safe_to_delete_tag()
+            if safe_delete_tag:
+                _vrf.tags.add(safe_delete_tag)
+                _vrf.save()
+                self.adapter.job.logger.info(f"Tagged VRF {self.name} as 'Safe to Delete'")
+            else:
+                self.adapter.job.logger.error(f"Could not create 'Safe to Delete' tag for VRF {self.name}")
         except (OrmTenant.DoesNotExist, OrmVrf.DoesNotExist):
-            self.adapter.job.logger.warning(f"VRF {self.name} or tenant {self.tenant} does not exist, skipping deletion.")
+            self.adapter.job.logger.warning(f"VRF {self.name} or tenant {self.tenant} does not exist, skipping deletion tagging.")
+        except Exception as e:
+            self.adapter.job.logger.error(f"Error tagging VRF {self.name} for deletion: {e}")
         return self
 
 
@@ -256,13 +290,10 @@ class NautobotDeviceType(DeviceType):
         return super().update(attrs)
 
     def delete(self):
-        """Delete DeviceType object in Nautobot."""
-        self.adapter.job.logger.warning(f"Device Type {self.model} will be deleted.")
-        try:
-            _devicetype = OrmDeviceType.objects.get(model=self.model)
-            _devicetype.delete()
-        except OrmDeviceType.DoesNotExist:
-            self.adapter.job.logger.warning(f"DeviceType {self.model} does not exist, skipping deletion.")
+        """Mark DeviceType as candidate for deletion instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"Device Type {self.model} marked as candidate for deletion (DeviceTypes cannot be tagged)")
+        self.adapter.job.logger.info(f"DeviceType '{self.model}' would be deleted - manual review required")
+        # Note: DeviceType objects don't support tags, so we can only log the deletion candidate
         return super().delete()
 
 
@@ -297,13 +328,10 @@ class NautobotDeviceRole(DeviceRole):
         return super().update(attrs)
 
     def delete(self):
-        """Delete DeviceRole object in Nautobot."""
-        self.adapter.job.logger.warning(f"Device Role {self.name} will be deleted.")
-        try:
-            _devicerole = Role.objects.get(name=self.name)
-            _devicerole.delete()
-        except Role.DoesNotExist:
-            self.adapter.job.logger.warning(f"DeviceRole {self.name} does not exist, skipping deletion.")
+        """Mark DeviceRole as candidate for deletion instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"Device Role {self.name} marked as candidate for deletion (Roles cannot be tagged)")
+        self.adapter.job.logger.info(f"DeviceRole '{self.name}' would be deleted - manual review required")
+        # Note: Role objects don't support tags, so we can only log the deletion candidate
         return super().delete()
 
 
@@ -455,8 +483,8 @@ class NautobotDevice(Device):
         return super().update(attrs)
 
     def delete(self):
-        """Delete Device object in Nautobot."""
-        self.adapter.job.logger.warning(f"Device {self.name} will be deleted.")
+        """Tag Device object as 'Safe to Delete' instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"Device {self.name} marked as 'Safe to Delete'")
         super().delete()
         try:
             _device = OrmDevice.objects.get(
@@ -468,9 +496,17 @@ class NautobotDevice(Device):
                     else self.adapter.job.vmanage.location.location_type,
                 ),
             )
-            self.adapter.objects_to_delete["device"].append(_device)
+            safe_delete_tag = get_or_create_safe_to_delete_tag()
+            if safe_delete_tag:
+                _device.tags.add(safe_delete_tag)
+                _device.save()
+                self.adapter.job.logger.info(f"Tagged device {self.name} as 'Safe to Delete'")
+            else:
+                self.adapter.job.logger.error(f"Could not create 'Safe to Delete' tag for device {self.name}")
         except (OrmDevice.DoesNotExist, Location.DoesNotExist):
-            self.adapter.job.logger.warning(f"Device {self.name} or location {self.site} does not exist, skipping deletion.")
+            self.adapter.job.logger.warning(f"Device {self.name} or location {self.site} does not exist, skipping deletion tagging.")
+        except Exception as e:
+            self.adapter.job.logger.error(f"Error tagging device {self.name} for deletion: {e}")
         return self
 
 
@@ -518,16 +554,10 @@ class NautobotInterfaceTemplate(InterfaceTemplate):
         return super().update(attrs)
 
     def delete(self):
-        """Delete InterfaceTemplate object in Nautobot."""
-        self.adapter.job.logger.warning(f"Interface Template {self.name} will be deleted.")
-        try:
-            _interfacetemplate = OrmInterfaceTemplate.objects.get(
-                name=self.name,
-                device_type=OrmDeviceType.objects.get(model=self.device_type),
-            )
-            _interfacetemplate.delete()
-        except (OrmInterfaceTemplate.DoesNotExist, OrmDeviceType.DoesNotExist):
-            self.adapter.job.logger.warning(f"InterfaceTemplate {self.name} or DeviceType {self.device_type} does not exist, skipping deletion.")
+        """Mark InterfaceTemplate as candidate for deletion instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"Interface Template {self.name} marked as candidate for deletion (InterfaceTemplates cannot be tagged)")
+        self.adapter.job.logger.info(f"InterfaceTemplate '{self.name}' for DeviceType '{self.device_type}' would be deleted - manual review required")
+        # Note: InterfaceTemplate objects don't support tags, so we can only log the deletion candidate
         return super().delete()
 
 
@@ -745,8 +775,8 @@ class NautobotInterface(Interface):
         return super().update(attrs)
 
     def delete(self):
-        """Delete Interface object in Nautobot."""
-        self.adapter.job.logger.warning(f"Interface {self.name} will be deleted.")
+        """Tag Interface object as 'Safe to Delete' instead of actually deleting it."""
+        self.adapter.job.logger.warning(f"Interface {self.name} on device {self.device} marked as 'Safe to Delete'")
         try:
             device = OrmDevice.objects.get(
                 name=self.device,
@@ -759,11 +789,22 @@ class NautobotInterface(Interface):
             )
         except OrmDevice.DoesNotExist:
             self.adapter.job.logger.warning(
-                f"Device {self.device} does not exist, skipping deletion of interface {self.name}"
+                f"Device {self.device} does not exist, skipping deletion tagging of interface {self.name}"
             )
         else:
-            _interface = OrmInterface.objects.get(name=self.name, device=device)
-            _interface.delete()
+            try:
+                _interface = OrmInterface.objects.get(name=self.name, device=device)
+                safe_delete_tag = get_or_create_safe_to_delete_tag()
+                if safe_delete_tag:
+                    _interface.tags.add(safe_delete_tag)
+                    _interface.save()
+                    self.adapter.job.logger.info(f"Tagged interface {self.name} on device {self.device} as 'Safe to Delete'")
+                else:
+                    self.adapter.job.logger.error(f"Could not create 'Safe to Delete' tag for interface {self.name}")
+            except OrmInterface.DoesNotExist:
+                self.adapter.job.logger.warning(f"Interface {self.name} on device {self.device} does not exist")
+            except Exception as e:
+                self.adapter.job.logger.error(f"Error tagging interface {self.name} for deletion: {e}")
         return super().delete()
 
 

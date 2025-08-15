@@ -171,7 +171,7 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading device roles: {e}")
 
     def load_devices(self):
-        """Load only devices that exist in the target location."""
+        """Load only SD-WAN managed devices that exist in the target location."""
         try:
             # Only load devices from the specific target location
             target_location = self.site_name
@@ -179,10 +179,16 @@ class NautobotAdapter(Adapter):
                 self.job.logger.warning("No target location specified - no devices to load")
                 return
             
-            # Load devices only from the target location
-            devices = Device.objects.filter(location__name=target_location)
+            # Load only SD-WAN managed devices from the target location
+            # Filter to devices that have SD-WAN custom fields to avoid managing non-SD-WAN devices
+            devices = Device.objects.filter(
+                location__name=target_location,
+                custom_field_data__catalyst_sdwan_uuid__isnull=False
+            ).exclude(
+                custom_field_data__catalyst_sdwan_uuid=""
+            )
             
-            self.job.logger.info(f"Loading {len(devices)} devices from location: {target_location}")
+            self.job.logger.info(f"Loading {len(devices)} SD-WAN managed devices from location: {target_location}")
             
             for device in devices:
                 new_device = self.device(
@@ -238,7 +244,7 @@ class NautobotAdapter(Adapter):
             self.job.logger.warning(f"Error loading interface templates: {e}")
 
     def load_interfaces(self):
-        """Load only Interfaces from devices that are actually being synced."""
+        """Load only SD-WAN managed Interfaces from devices that are actually being synced."""
         try:
             # Only load interfaces from devices in the target location
             target_location = self.site_name
@@ -246,9 +252,16 @@ class NautobotAdapter(Adapter):
                 self.job.logger.warning("No target location specified - no interfaces to load")
                 return
             
-            interfaces = Interface.objects.filter(device__location__name=target_location)
+            # Filter to only load interfaces that have SD-WAN custom fields
+            # This ensures we only manage interfaces that were previously created/managed by SD-WAN
+            interfaces = Interface.objects.filter(
+                device__location__name=target_location,
+                custom_field_data__catalyst_sdwan_vpn_id__isnull=False
+            ).exclude(
+                custom_field_data__catalyst_sdwan_vpn_id=""
+            )
             
-            self.job.logger.info(f"Loading {len(interfaces)} interfaces from devices in location: {target_location}")
+            self.job.logger.info(f"Loading {len(interfaces)} SD-WAN managed interfaces from devices in location: {target_location}")
             
             for interface in interfaces:
                 new_interface = self.interface(
