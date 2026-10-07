@@ -1,0 +1,96 @@
+{% extends 'generic/object_retrieve.html' %}
+{% load helpers %}
+{% load buttons %}
+
+{% block breadcrumbs %}
+    <li><a href="{% url 'plugins:nautobot_ssot:config' %}">SSOT Configs</a></li>
+    <li><a href="{% url 'plugins:nautobot_ssot:ssotinfobloxuddiconfig_list' %}">SSOT Infoblox Universal DDI Configs</a></li>
+    <li>{{ object|hyperlinked_object }}</li>
+{% endblock breadcrumbs %}
+
+{% block extra_buttons %}
+<a href="{% url 'plugins:nautobot_ssot:config' %}"><button type="button" class="btn btn-primary">SSOT Configs</button></a>
+{% endblock extra_buttons %}
+
+{% block masthead %}
+    <h1>
+        {% block title %}{{ object }}{% endblock title %}
+    </h1>
+{% endblock masthead %}
+
+{% block content_left_page %}
+    <div class="panel panel-default">
+        <div class="panel-heading">
+            <strong>Infoblox Universal DDI Config</strong>
+        </div>
+        <table class="table table-hover panel-body attr-table">
+            <tr>
+                <td>Name</td>
+                <td>{{ object.name }}</td>
+            </tr>
+            <tr>
+                <td>Description</td>
+                <td>{{ object.description|placeholder }}</td>
+            </tr>
+            <tr>
+                <td>Universal DDI Instance</td>
+                <td>{{ object.uddi_instance|hyperlinked_object }}</td>
+            </tr>
+            <tr>
+                <td>IP Space</td>
+                <td>{{ object.uddi_ip_space }}</td>
+            </tr>
+            <tr>
+                <td>Default Namespace</td>
+                <td>{{ object.default_namespace|hyperlinked_object }}</td>
+            </tr>
+            <tr>
+                <td>Default Status</td>
+                <td>{{ object.default_status|hyperlinked_object }}</td>
+            </tr>
+            <tr>
+                <td>Job Enabled</td>
+                <td>{{ object.job_enabled }}</td>
+            </tr>
+            <tr>
+                <td>Sync to Nautobot</td>
+                <td>{{ object.enable_sync_to_nautobot }}</td>
+            </tr>
+            <tr>
+                <td>Import Prefixes</td>
+                <td>{{ object.import_prefixes }}</td>
+            </tr>
+            <tr>
+                <td>Import IP Addresses</td>
+                <td>{{ object.import_ip_addresses }}</td>
+            </tr>
+            <tr>
+                <td>Import DNS Zones</td>
+                <td>{{ object.import_dns_zones }}</td>
+            </tr>
+            <tr>
+                <td>Import DNS Records</td>
+                <td>{{ object.import_dns_records }}</td>
+            </tr>
+            <tr>
+                <td>Safe Delete Mode</td>
+                <td>{{ object.safe_delete_mode }}</td>
+            </tr>
+        </table>
+    </div>
+{% endblock %}
+
+{% block content_right_page %}
+    <div class="panel panel-default">
+        <div class="panel-heading">
+            <strong>DNS Record Types</strong>
+        </div>
+        <table class="table table-hover panel-body attr-table">
+            <tr>
+                <td>
+                {% include 'extras/inc/json_data.html' with data=object.dns_record_types format="json" %}
+                </td>
+            </tr>
+        </table>
+    </div>
+{% endblock %}

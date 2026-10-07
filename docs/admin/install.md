@@ -96,6 +96,7 @@ Set up each integration using the specific guides:
 - [Device42](./integrations/device42_setup.md)
 - [Cisco DNA Center](./integrations/dna_center_setup.md)
 - [Infoblox](./integrations/infoblox_setup.md)
+- [Infoblox Universal DDI](./integrations/infoblox_uddi_setup.md)
 - [IPFabric](./integrations/ipfabric_setup.md)
 - [Itential](./integrations/itential_setup.md)
 - [LibreNMS](./integrations/librenms_setup.md)

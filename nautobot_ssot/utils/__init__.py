@@ -122,3 +122,17 @@ def validate_dlm_installed() -> bool:
     except PackageNotFoundError:
         pass
     return False
+
+
+def validate_dns_models_installed() -> bool:
+    """Validate if the optional `nautobot-dns-models` App is installed.
+
+    Returns:
+        bool: True if nautobot-dns-models App is installed, False otherwise.
+    """
+    try:
+        version("nautobot-dns-models")
+        return True
+    except PackageNotFoundError:
+        pass
+    return False

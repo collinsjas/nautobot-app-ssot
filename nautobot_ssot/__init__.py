@@ -108,6 +108,7 @@ class NautobotSSOTAppConfig(NautobotAppConfig):
         "enable_dna_center": False,
         "enable_citrix_adm": False,
         "enable_infoblox": False,
+        "enable_infoblox_uddi": False,
         "enable_ipfabric": False,
         "enable_librenms": False,
         "enable_meraki": False,

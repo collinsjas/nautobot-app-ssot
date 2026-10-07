@@ -55,6 +55,10 @@ httpx = { version = ">=0.23.3", optional = true }
 dnacentersdk = { version = "^2.5.6", optional = true }
 meraki = { version = "^1.37.2,<1.46.0", optional = true }
 slurpit-sdk = { version = "^0.9.58", optional = true }
+# used for the Infoblox Universal DDI (BloxOne) integration; raises the floor to Python 3.10 for this extra only
+universal-ddi-python-client = { version = ">=1.0.0", optional = true, python = ">=3.10" }
+# optional soft dependency for full DNS Zone/Record fidelity in the Infoblox Universal DDI integration
+nautobot-dns-models = { version = ">=1.0.0", optional = true }
 
 [tool.poetry.group.dev.dependencies]
 coverage = "*"
@@ -148,6 +152,9 @@ dna_center = [
 infoblox = [
     "dnspython",
 ]
+infoblox_uddi = [
+    "universal-ddi-python-client",
+]
 ipfabric = [
     "httpx",
     "ipfabric",
@@ -186,6 +193,9 @@ servicenow = [
 ]
 nautobot-device-lifecycle-mgmt = [
     "nautobot-device-lifecycle-mgmt",
+]
+nautobot-dns-models = [
+    "nautobot-dns-models",
 ]
 
 [tool.pylint.master]

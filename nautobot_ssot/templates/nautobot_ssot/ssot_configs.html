@@ -30,6 +30,14 @@
             </a></td>
         </tr>
         {% endif %}
+        {% if perms.nautobot_ssot.view_ssotinfobloxuddiconfig and "infoblox_uddi" in enabled_integrations %}
+        <tr>
+            <td>Infoblox Universal DDI</td>
+            <td><a href="{% url 'plugins:nautobot_ssot:ssotinfobloxuddiconfig_list' %}">
+                Infoblox Universal DDI Configuration List
+            </a></td>
+        </tr>
+        {% endif %}
         {% if perms.nautobot_ssot.view_ssotservicenowconfig and "servicenow" in enabled_integrations %}
         <tr>
             <td>ServiceNow</td>

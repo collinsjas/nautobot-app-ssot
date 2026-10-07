@@ -9,6 +9,7 @@ This Nautobot app supports the following integrations:
 - [Device42](./device42.md)
 - [Cisco DNA Center](./dna_center.md)
 - [Infoblox](./infoblox.md)
+- [Infoblox Universal DDI](./infoblox_uddi.md)
 - [IPFabric](./ipfabric.md)
 - [Itential](./itential.md)
 - [LibreNMS](./librenms.md)

@@ -1,0 +1,1 @@
+Added new `infoblox_uddi` integration to sync Prefixes, IP Addresses, DNS Zones, and DNS Records one-way from Infoblox Universal DDI (BloxOne CSP) into Nautobot. DNS Zone/Record sync uses the optional `nautobot-dns-models` app for full fidelity, or falls back to `IPAddress.dns_name` when that app is not installed.

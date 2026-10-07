@@ -1,0 +1,30 @@
+{% extends 'generic/object_create.html' %}
+{% load form_helpers %}
+
+{% block form %}
+    <div class="panel panel-default">
+        <div class="panel-heading"><strong>Infoblox Universal DDI Config</strong></div>
+        <div class="panel-body">
+            {% render_field form.name %}
+            {% render_field form.description %}
+            {% render_field form.uddi_instance %}
+            {% render_field form.uddi_ip_space %}
+            {% render_field form.default_namespace %}
+            {% render_field form.default_status %}
+            {% render_field form.job_enabled %}
+            {% render_field form.enable_sync_to_nautobot %}
+            {% render_field form.import_prefixes %}
+            {% render_field form.import_ip_addresses %}
+            {% render_field form.import_dns_zones %}
+            {% render_field form.import_dns_records %}
+            {% render_field form.dns_record_types %}
+            {% render_field form.safe_delete_mode %}
+        </div>
+    </div>
+    <div class="panel panel-default">
+        <div class="panel-heading"><strong>Notes</strong></div>
+        <div class="panel-body">
+            {% render_field form.object_note %}
+        </div>
+    </div>
+{% endblock %}
