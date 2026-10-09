@@ -91,7 +91,7 @@ def dlm_supports_softwarelcm() -> bool:
     """
     try:
         dlm_version = version("nautobot_device_lifecycle_mgmt")
-        if re.match("[012].+", dlm_version):
+        if re.match(r"[012].+", dlm_version):
             return True
     except PackageNotFoundError:
         pass
@@ -105,7 +105,7 @@ def core_supports_softwareversion() -> bool:
         bool: True if Nautobot version is 2.2.0 or higher, False otherwise.
     """
     nb_version = version("nautobot")
-    if re.match("2.[23456789].+", nb_version):
+    if re.match(r"2.[23456789].+", nb_version):
         return True
     return False
 

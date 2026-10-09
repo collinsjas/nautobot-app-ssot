@@ -3,7 +3,7 @@
 import os
 import sys
 
-from nautobot.core.settings import *  # noqa: F403  # pylint: disable=wildcard-import,unused-wildcard-import
+from nautobot.core.settings import *  # ruff: ignore[undefined-local-with-import-star]  # pylint: disable=wildcard-import,unused-wildcard-import
 from nautobot.core.settings_funcs import is_truthy
 
 #
@@ -16,10 +16,10 @@ _TESTING = len(sys.argv) > 1 and sys.argv[1] == "test"
 if DEBUG and not _TESTING:
     DEBUG_TOOLBAR_CONFIG = {"SHOW_TOOLBAR_CALLBACK": lambda _request: True}
 
-    if "debug_toolbar" not in INSTALLED_APPS:  # noqa: F405
-        INSTALLED_APPS.append("debug_toolbar")  # noqa: F405
-    if "debug_toolbar.middleware.DebugToolbarMiddleware" not in MIDDLEWARE:  # noqa: F405
-        MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")  # noqa: F405
+    if "debug_toolbar" not in INSTALLED_APPS:  # ruff: ignore[undefined-local-with-import-star-usage]
+        INSTALLED_APPS.append("debug_toolbar")  # ruff: ignore[undefined-local-with-import-star-usage]
+    if "debug_toolbar.middleware.DebugToolbarMiddleware" not in MIDDLEWARE:  # ruff: ignore[undefined-local-with-import-star-usage]
+        MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")  # ruff: ignore[undefined-local-with-import-star-usage]
 
 #
 # Misc. settings

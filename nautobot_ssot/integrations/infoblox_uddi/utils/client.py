@@ -65,17 +65,17 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
         """
         try:
             from universal_ddi_client import ApiClient, Configuration  # pylint: disable=import-outside-toplevel
+            from universal_ddi_client.dns_config import (  # pylint: disable=import-outside-toplevel
+                AuthZoneApi,
+                ViewApi,
+            )
+            from universal_ddi_client.dns_data import RecordApi  # pylint: disable=import-outside-toplevel
             from universal_ddi_client.ipam import (  # pylint: disable=import-outside-toplevel
                 AddressApi,
                 AddressBlockApi,
                 IpSpaceApi,
                 SubnetApi,
             )
-            from universal_ddi_client.dns_config import (  # pylint: disable=import-outside-toplevel
-                AuthZoneApi,
-                ViewApi,
-            )
-            from universal_ddi_client.dns_data import RecordApi  # pylint: disable=import-outside-toplevel
         except ImportError as error:
             raise ImportError(
                 "The `universal-ddi-python-client` package is required to use the Infoblox Universal DDI "

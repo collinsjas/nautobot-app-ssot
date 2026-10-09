@@ -38,7 +38,8 @@ class Prefix(base.Prefix):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create a Prefix in Nautobot."""
-        from nautobot.ipam.models import Namespace, Prefix as OrmPrefix  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Namespace  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Prefix as OrmPrefix
 
         namespace = Namespace.objects.get(name=ids["namespace"])
         status = Status.objects.get(name=attrs.get("status", "Active"))
@@ -55,7 +56,8 @@ class Prefix(base.Prefix):
 
     def update(self, attrs):
         """Update a Prefix in Nautobot."""
-        from nautobot.ipam.models import Namespace, Prefix as OrmPrefix  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Namespace  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Prefix as OrmPrefix
 
         namespace = Namespace.objects.get(name=self.namespace)
         prefix = OrmPrefix.objects.get(prefix=self.network, namespace=namespace)
@@ -70,7 +72,8 @@ class Prefix(base.Prefix):
 
     def delete(self):
         """Delete (or safe-delete) a Prefix from Nautobot."""
-        from nautobot.ipam.models import Namespace, Prefix as OrmPrefix  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Namespace  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Prefix as OrmPrefix
 
         namespace = Namespace.objects.get(name=self.namespace)
         prefix = OrmPrefix.objects.get(prefix=self.network, namespace=namespace)
