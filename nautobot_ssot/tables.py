@@ -24,9 +24,9 @@ STATUS_LOGS_LINK = """
 
 DRY_RUN_LABEL = """
 {% if record.dry_run %}
-<span class="dry_run label label-default">Dry Run</span>
+<span class="dry_run badge bg-secondary">Dry Run</span>
 {% else %}
-<span class="dry_run label label-info">Sync</span>
+<span class="dry_run badge bg-info">Sync</span>
 {% endif %}
 """
 
@@ -40,7 +40,10 @@ class DashboardTable(BaseTable):  # pylint: disable=nb-sub-class-name
     start_time = DateTimeColumn(linkify=True, short=True)
     source = Column(linkify=lambda record: record.get_source_url())
     target = Column(linkify=lambda record: record.get_target_url())
-    status = TemplateColumn(template_code="{% include 'extras/inc/job_label.html' with result=record.job_result %}")
+    status = TemplateColumn(
+        template_code="{% include 'extras/inc/job_label.html' with result=record.job_result %}",
+        accessor="job_result__status",
+    )
     dry_run = TemplateColumn(template_code=DRY_RUN_LABEL, verbose_name="Type")
 
     class Meta(BaseTable.Meta):
@@ -58,9 +61,16 @@ class SyncTable(BaseTable):
     source = Column(linkify=lambda record: record.get_source_url())
     target = Column(linkify=lambda record: record.get_target_url())
     start_time = DateTimeColumn(linkify=True, short=True)
-    duration = TemplateColumn(template_code="{% load shorter_timedelta %}{{ record.duration | shorter_timedelta }}")
+    duration = TemplateColumn(
+        template_code="{% load shorter_timedelta %}{{ record.duration | shorter_timedelta }}",
+        orderable=False,
+    )
     dry_run = TemplateColumn(template_code=DRY_RUN_LABEL, verbose_name="Type")
-    status = TemplateColumn(template_code="{% include 'extras/inc/job_label.html' with result=record.job_result %}")
+    status = TemplateColumn(
+        template_code="{% include 'extras/inc/job_label.html' with result=record.job_result %}",
+        accessor="job_result__status",
+    )
+    user = Column(accessor="job_result__user", orderable=True, verbose_name="User")
 
     num_unchanged = TemplateColumn(
         template_code=ACTION_LOGS_LINK,
@@ -155,10 +165,10 @@ class SyncTableSingleSourceOrTarget(SyncTable):  # pylint: disable=nb-no-model-f
         )
 
 
-ACTION_LABEL = """<span class="label label-{{ record.get_action_class }}">{{ record.action }}</span>"""
+ACTION_LABEL = """<span class="badge bg-{{ record.get_action_class }}">{{ record.action }}</span>"""
 
 
-LOG_STATUS_LABEL = """<span class="label label-{{ record.get_status_class }}">{{ record.status }}</span>"""
+LOG_STATUS_LABEL = """<span class="badge bg-{{ record.get_status_class }}">{{ record.status }}</span>"""
 
 
 SYNCED_OBJECT = """
@@ -179,7 +189,7 @@ class SyncLogEntryTable(BaseTable):
     status = TemplateColumn(template_code=LOG_STATUS_LABEL)
     diff = JSONColumn(orderable=False)
     message = TemplateColumn(template_code=MESSAGE_SPAN, orderable=False)
-    synced_object = TemplateColumn(template_code=SYNCED_OBJECT)
+    synced_object = TemplateColumn(template_code=SYNCED_OBJECT, orderable=False)
 
     class Meta(BaseTable.Meta):
         """Metaclass attributes of SyncLogEntryTable."""

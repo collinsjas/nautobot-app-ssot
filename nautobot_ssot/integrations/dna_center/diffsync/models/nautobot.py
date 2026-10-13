@@ -11,29 +11,19 @@ from nautobot.dcim.models import (
     Interface,
     Location,
     Manufacturer,
+    SoftwareImageFile,
+    SoftwareVersion,
 )
 from nautobot.extras.models import Role
+from nautobot.extras.models.metadata import ObjectMetadata  # noqa: F401
 from nautobot.ipam.models import IPAddress, IPAddressToInterface, Namespace, Prefix
 
+from nautobot_ssot.integrations.dna_center.constants import SCOPED_FIELDS_MAPPING
 from nautobot_ssot.integrations.dna_center.diffsync.models import base
 from nautobot_ssot.integrations.dna_center.utils.nautobot import (
-    add_software_lcm,
-    assign_version_to_device,
     verify_platform,
 )
-from nautobot_ssot.utils import core_supports_softwareversion, dlm_supports_softwarelcm
-
-if core_supports_softwareversion():
-    from nautobot.dcim.models import SoftwareImageFile, SoftwareVersion
-
-try:
-    from nautobot.extras.models.metadata import ObjectMetadata  # noqa: F401
-
-    from nautobot_ssot.integrations.dna_center.utils.nautobot import add_or_update_metadata_on_object
-
-    METADATA_FOUND = True
-except (ImportError, RuntimeError):
-    METADATA_FOUND = False
+from nautobot_ssot.integrations.metadata_utils import add_or_update_metadata_on_object
 
 
 class NautobotArea(base.Area):
@@ -61,11 +51,10 @@ class NautobotArea(base.Area):
         except ValidationError as err:
             adapter.job.logger.warning(f"Unable to create {adapter.job.area_loctype.name} {ids['name']}. {err}")
             return None
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter, obj=new_area, scoped_fields=["name", "location_type", "status"]
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_area, scoped_fields=SCOPED_FIELDS_MAPPING["area"]
+        )
+        metadata.validated_save()
         if ids["parent"] not in adapter.region_map:
             adapter.region_map[ids["parent"]] = {}
         adapter.region_map[ids["parent"]][ids["name"]] = new_area.id
@@ -74,17 +63,10 @@ class NautobotArea(base.Area):
     def update(self, attrs):
         """Update Region in Nautobot from Area object."""
         region = Location.objects.get(id=self.uuid)
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=self.adapter,
-                obj=region,
-                scoped_fields=[
-                    "name",
-                    "location_type",
-                    "status",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=region, scoped_fields=SCOPED_FIELDS_MAPPING["area"]
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -96,7 +78,7 @@ class NautobotArea(base.Area):
             return None
         area = Location.objects.get(id=self.uuid)
         if self.adapter.job.debug:
-            self.adapter.job.logger.info(f"Deleting {self.job.area_loctype.name} {area.name}.")
+            self.adapter.job.logger.info(f"Deleting {self.adapter.job.area_loctype.name} {area.name}.")
         self.adapter.objects_to_delete["regions"].append(area)
         return self
 
@@ -125,21 +107,10 @@ class NautobotBuilding(base.Building):
         except ValidationError as err:
             adapter.job.logger.error(f"Unable to create {adapter.job.building_loctype.name} {ids['name']}. {err}")
             return None
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter,
-                obj=new_building,
-                scoped_fields=[
-                    "name",
-                    "location_type",
-                    "parent",
-                    "physical_address",
-                    "status",
-                    "latitude",
-                    "longitude",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_building, scoped_fields=SCOPED_FIELDS_MAPPING["building"]
+        )
+        metadata.validated_save()
         if ids["area"] not in adapter.site_map:
             adapter.site_map[ids["area"]] = {}
         adapter.site_map[ids["area"]][ids["name"]] = new_building.id
@@ -169,21 +140,10 @@ class NautobotBuilding(base.Building):
             else:
                 site.tenant = None
         site.validated_save()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=self.adapter,
-                obj=site,
-                scoped_fields=[
-                    "name",
-                    "location_type",
-                    "parent",
-                    "physical_address",
-                    "status",
-                    "latitude",
-                    "longitude",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=site, scoped_fields=SCOPED_FIELDS_MAPPING["building"]
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -217,18 +177,10 @@ class NautobotFloor(base.Floor):
         if attrs.get("tenant"):
             new_floor.tenant_id = adapter.tenant_map[attrs["tenant"]]
         new_floor.validated_save()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter,
-                obj=new_floor,
-                scoped_fields=[
-                    "name",
-                    "location_type",
-                    "parent",
-                    "status",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_floor, scoped_fields=SCOPED_FIELDS_MAPPING["floor"]
+        )
+        metadata.validated_save()
         if ids["area"] not in adapter.floor_map:
             adapter.floor_map[ids["area"]] = {}
         if ids["building"] not in adapter.floor_map[ids["area"]]:
@@ -247,18 +199,10 @@ class NautobotFloor(base.Floor):
             else:
                 floor.tenant = None
         floor.validated_save()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=self.adapter,
-                obj=floor,
-                scoped_fields=[
-                    "name",
-                    "location_type",
-                    "parent",
-                    "status",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=floor, scoped_fields=SCOPED_FIELDS_MAPPING["floor"]
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -308,37 +252,20 @@ class NautobotDevice(base.Device):
         if attrs.get("tenant"):
             new_device.tenant_id = adapter.tenant_map[attrs["tenant"]]
         if attrs.get("version"):
-            if dlm_supports_softwarelcm() and not core_supports_softwareversion():
-                lcm_obj = add_software_lcm(adapter=adapter, platform=platform.network_driver, version=attrs["version"])
-                assign_version_to_device(adapter=adapter, device=new_device, software_lcm=lcm_obj)
-            if core_supports_softwareversion():
-                soft_version = SoftwareVersion.objects.get_or_create(
-                    version=attrs["version"], platform=platform, defaults={"status_id": adapter.status_map["Active"]}
-                )[0]
-                image, _ = SoftwareImageFile.objects.get_or_create(
-                    image_file_name=f"{platform.name}-{attrs['version']}-dnac-ssot-placeholder",
-                    software_version=soft_version,
-                    status_id=adapter.status_map["Active"],
-                )
-                image.device_types.add(device_type)
-                new_device.software_version = soft_version
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter,
-                obj=new_device,
-                scoped_fields=[
-                    "name",
-                    "status",
-                    "role",
-                    "location",
-                    "device_type",
-                    "serial",
-                    "plaform",
-                    "controller_managed_device_group",
-                    "tenant",
-                ],
+            soft_version = SoftwareVersion.objects.get_or_create(
+                version=attrs["version"], platform=platform, defaults={"status_id": adapter.status_map["Active"]}
+            )[0]
+            image, _ = SoftwareImageFile.objects.get_or_create(
+                image_file_name=f"{platform.name}-{attrs['version']}-dnac-ssot-placeholder",
+                software_version=soft_version,
+                status_id=adapter.status_map["Active"],
             )
-            adapter.objects_to_create["metadata"].append(metadata)
+            image.device_types.add(device_type)
+            new_device.software_version = soft_version
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_device, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        adapter.objects_to_create["metadata"].append(metadata)
         new_device.cf["system_of_record"] = "DNA Center"
         new_device.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         adapter.objects_to_create["devices"].append(new_device)
@@ -367,7 +294,7 @@ class NautobotDevice(base.Device):
             else:
                 area_name = self.area
             device.location_id = self.adapter.site_map[area_name][site_name]
-            if attrs["floor"]:
+            if attrs.get("floor"):
                 device.location_id = self.adapter.floor_map[area_name][site_name][attrs["floor"]]
         if "model" in attrs:
             if attrs.get("vendor"):
@@ -391,41 +318,22 @@ class NautobotDevice(base.Device):
         if "controller_group" in attrs:
             device.controller_managed_device_group = self.adapter.job.controller_group
         if "version" in attrs:
-            if dlm_supports_softwarelcm():
-                platform_network_driver = attrs["platform"] if attrs.get("platform") else self.platform
-                lcm_obj = add_software_lcm(
-                    adapter=self.adapter, platform=platform_network_driver, version=attrs["version"]
-                )
-                assign_version_to_device(adapter=self.adapter, device=device, software_lcm=lcm_obj)
-            if core_supports_softwareversion():
-                if attrs.get("platform"):
-                    platform = attrs["platform"]
-                else:
-                    platform = self.platform
-                device.software_version = SoftwareVersion.objects.get_or_create(
-                    version=attrs["version"],
-                    platform_id=self.adapter.platform_map[platform],
-                    defaults={"status_id": self.adapter.status_map["Active"]},
-                )[0]
+            if attrs.get("platform"):
+                platform = attrs["platform"]
+            else:
+                platform = self.platform
+            device.software_version = SoftwareVersion.objects.get_or_create(
+                version=attrs["version"],
+                platform_id=self.adapter.platform_map[platform],
+                defaults={"status_id": self.adapter.status_map["Active"]},
+            )[0]
         device.cf["system_of_record"] = "DNA Center"
         device.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=self.adapter,
-                obj=device,
-                scoped_fields=[
-                    "name",
-                    "status",
-                    "role",
-                    "location",
-                    "device_type",
-                    "serial",
-                    "plaform",
-                    "controller_managed_device_group",
-                    "tenant",
-                ],
-            )
-            metadata.validated_save()
+        device.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=device, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -458,24 +366,8 @@ class NautobotPort(base.Port):
             status_id=adapter.status_map[attrs["status"]],
             mgmt_only=True if "Management" in ids["name"] else False,
         )
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter,
-                obj=new_port,
-                scoped_fields=[
-                    "name",
-                    "device",
-                    "description",
-                    "enabled",
-                    "type",
-                    "mode",
-                    "mac_address",
-                    "mtu",
-                    "status",
-                    "mgmt_only",
-                ],
-            )
-            adapter.objects_to_create["metadata"].append(metadata)
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=new_port, scoped_fields=SCOPED_FIELDS_MAPPING)
+        adapter.objects_to_create["metadata"].append(metadata)
         new_port.cf["system_of_record"] = "DNA Center"
         new_port.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         adapter.objects_to_create["interfaces"].append(new_port)
@@ -506,24 +398,8 @@ class NautobotPort(base.Port):
         port.cf["system_of_record"] = "DNA Center"
         port.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         port.validated_save()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=self.adapter,
-                obj=port,
-                scoped_fields=[
-                    "name",
-                    "device",
-                    "description",
-                    "enabled",
-                    "type",
-                    "mode",
-                    "mac_address",
-                    "mtu",
-                    "status",
-                    "mgmt_only",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(adapter=self.adapter, obj=port, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -558,18 +434,10 @@ class NautobotPrefix(base.Prefix):
             new_prefix.description = "Catch-all Prefix from DNA Center SSoT."
         if attrs.get("tenant"):
             new_prefix.tenant_id = adapter.tenant_map[attrs["tenant"]]
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter,
-                obj=new_prefix,
-                scoped_fields=[
-                    "prefix",
-                    "namespace",
-                    "status",
-                    "tenant",
-                ],
-            )
-            adapter.objects_to_create["metadata"].append(metadata)
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_prefix, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        adapter.objects_to_create["metadata"].append(metadata)
         new_prefix.cf["system_of_record"] = "DNA Center"
         new_prefix.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         new_prefix.validated_save()
@@ -585,18 +453,10 @@ class NautobotPrefix(base.Prefix):
             else:
                 prefix.tenant = None
         prefix.validated_save()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=self.adapter,
-                obj=prefix,
-                scoped_fields=[
-                    "prefix",
-                    "namespace",
-                    "status",
-                    "tenant",
-                ],
-            )
-            metadata.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=prefix, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         prefix.cf["system_of_record"] = "DNA Center"
         prefix.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         return super().update(attrs)
@@ -620,7 +480,7 @@ class NautobotIPAddress(base.IPAddress):
         """Create IPAddress in Nautobot from IPAddress object."""
         new_ip = IPAddress(
             address=f"{ids['host']}/{attrs['mask_length']}",
-            namespace=adapter.namespace_map[ids["namespace"]],
+            namespace=Namespace.objects.get(id=adapter.namespace_map[ids["namespace"]]),
             status_id=adapter.status_map["Active"],
         )
         if attrs.get("tenant"):
@@ -628,18 +488,8 @@ class NautobotIPAddress(base.IPAddress):
         new_ip.cf["system_of_record"] = "DNA Center"
         new_ip.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         new_ip.validated_save()
-        if METADATA_FOUND:
-            metadata = add_or_update_metadata_on_object(
-                adapter=adapter,
-                obj=new_ip,
-                scoped_fields=[
-                    "address",
-                    "namespace",
-                    "status",
-                    "tenant",
-                ],
-            )
-            adapter.objects_to_create["metadata"].append(metadata)
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=new_ip, scoped_fields=SCOPED_FIELDS_MAPPING)
+        adapter.objects_to_create["metadata"].append(metadata)
         adapter.ipaddr_map[ids["host"]] = new_ip.id
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
@@ -655,18 +505,10 @@ class NautobotIPAddress(base.IPAddress):
         ipaddr.cf["last_synced_from_sor"] = datetime.today().date().isoformat()
         try:
             ipaddr.validated_save()
-            if METADATA_FOUND:
-                metadata = add_or_update_metadata_on_object(
-                    adapter=self.adapter,
-                    obj=ipaddr,
-                    scoped_fields=[
-                        "address",
-                        "namespace",
-                        "status",
-                        "tenant",
-                    ],
-                )
-                metadata.validated_save()
+            metadata = add_or_update_metadata_on_object(
+                adapter=self.adapter, obj=ipaddr, scoped_fields=SCOPED_FIELDS_MAPPING
+            )
+            metadata.validated_save()
         except ValidationError as err:
             self.adapter.job.logger.warning(f"Unable to update {ipaddr}: {err}")
         return super().update(attrs)

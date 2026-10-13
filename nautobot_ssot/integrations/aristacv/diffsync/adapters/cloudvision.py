@@ -1,12 +1,12 @@
 """DiffSync adapter for Arista CloudVision."""
 
-import distutils
 import ipaddress
 import re
 
 import arista.tag.v2 as TAG
 from diffsync import Adapter
 from diffsync.exceptions import ObjectAlreadyExists, ObjectNotFound
+from nautobot.core.settings_funcs import is_truthy
 from pydantic import ValidationError
 
 from nautobot_ssot.integrations.aristacv.diffsync.models.cloudvision import (
@@ -49,7 +49,7 @@ class CloudvisionAdapter(Adapter):
                 "Configuration found for aristacv_hostname_patterns but no aristacv_site_mappings or aristacv_role_mappings. Please ensure your mappings are defined."
             )
         if config.create_controller:
-            cvp_version = cloudvision.get_cvp_version(config)
+            cvp_version = self.conn.get_version()
             cvp_ver_cf = self.cf(name="arista_eos", value=cvp_version, device_name="CloudVision")
             try:
                 self.add(cvp_ver_cf)
@@ -70,32 +70,31 @@ class CloudvisionAdapter(Adapter):
             except ObjectAlreadyExists as err:
                 self.job.logger.warning(f"Error attempting to add CloudVision device. {err}")
 
-        for index, dev in enumerate(
-            cloudvision.get_devices(
-                client=self.conn.comm_channel, logger=self.job.logger, import_active=config.import_active
-            ),
-            start=1,
-        ):
+        for index, dev in enumerate(self.conn.get_inventory()):
+            dev_status = "Active" if dev["streamingStatus"] == "active" else "Offline"
+            if config.import_active and dev_status != "Active":
+                continue
             if self.job.debug:
-                self.job.logger.info(f"Loading {index}° device")
+                self.job.logger.info(f"Loading {index + 1}° device")
             if dev["hostname"] != "":
                 new_device = self.device(
                     name=dev["hostname"],
-                    serial=dev["device_id"],
-                    status=dev["status"],
-                    device_model=dev["model"],
-                    version=dev["sw_ver"],
+                    serial=dev["serialNumber"],
+                    status=dev_status,
+                    device_model=dev["modelName"],
+                    version=dev["version"],
                     uuid=None,
                 )
                 try:
                     self.add(new_device)
                 except ObjectAlreadyExists as err:
                     self.job.logger.warning(
-                        f"Duplicate device {dev['hostname']} {dev['device_id']} found and ignored. {err}"
+                        f"Duplicate device {dev['hostname']} {dev['serialNumber']} found and ignored. {err}"
                     )
                     continue
                 self.load_interfaces(device=new_device)
-                self.load_ip_addresses(dev=new_device)
+                primary_ip = dev["ipAddress"]
+                self.load_ip_addresses(dev=new_device, primary_ip=primary_ip)
                 self.load_device_tags(device=new_device)
             else:
                 self.job.logger.warning(f"Device {dev} is missing hostname so won't be imported.")
@@ -117,6 +116,16 @@ class CloudvisionAdapter(Adapter):
             )
             return None
 
+        # Port-Channels are prepended so they exist in the DiffSync store before their
+        # members, which lets the Nautobot side resolve the lag FK on first sync.
+        port_channels = cloudvision.get_interfaces_port_channel(client=self.conn, dId=device.serial)
+        port_info = port_channels + port_info
+
+        member_map = cloudvision.get_port_channel_members(client=self.conn, dId=device.serial)
+        mode_map = cloudvision.get_all_interface_modes(client=self.conn, dId=device.serial)
+        transceiver_map = cloudvision.get_all_interface_transceivers(client=self.conn, dId=device.serial)
+        description_map = cloudvision.get_all_interface_descriptions(client=self.conn, dId=device.serial)
+
         if self.job.debug:
             self.job.logger.debug(f"Device being loaded: {device.name}. Port: {port_info}.")
 
@@ -124,20 +133,14 @@ class CloudvisionAdapter(Adapter):
             if self.job.debug:
                 self.job.logger.debug(f"Port {port['interface']} being loaded for {device.name}.")
 
-            port_mode = cloudvision.get_interface_mode(client=self.conn, dId=device.serial, interface=port["interface"])
-            transceiver = cloudvision.get_interface_transceiver(
-                client=self.conn, dId=device.serial, interface=port["interface"]
-            )
+            port_mode = mode_map.get(port["interface"], "Unknown")
+            transceiver = transceiver_map.get(port["interface"], "Unknown")
 
             if transceiver == "Unknown":
                 # Breakout transceivers, ie 40G -> 4x10G, shows up as 4 interfaces and requires looking at base interface to find transceiver, ie Ethernet1 if Ethernet1/1
                 base_port_name = re.sub(r"/\d", "", port["interface"])
-                transceiver = cloudvision.get_interface_transceiver(
-                    client=self.conn, dId=device.serial, interface=base_port_name
-                )
-            port_description = cloudvision.get_interface_description(
-                client=self.conn, dId=device.serial, interface=port["interface"]
-            )
+                transceiver = transceiver_map.get(base_port_name, "Unknown")
+            port_description = description_map.get(port["interface"], "")
             port_status = cloudvision.get_interface_status(port_info=port)
             port_type = cloudvision.get_port_type(port_info=port, transceiver=transceiver)
             if port["interface"] != "":
@@ -148,9 +151,10 @@ class CloudvisionAdapter(Adapter):
                     mac_addr=port["mac_addr"] if port.get("mac_addr") else "",
                     mode="tagged" if port_mode == "trunk" else "access",
                     mtu=port["mtu"] if port.get("mtu") else 1500,
-                    enabled=port["enabled"],
+                    enabled=port.get("enabled", False),
                     status=port_status,
                     port_type=port_type,
+                    lag=member_map.get(port["interface"]),
                     uuid=None,
                 )
                 try:
@@ -165,7 +169,7 @@ class CloudvisionAdapter(Adapter):
                         f"Duplicate port {port['interface']} found for {device.name} and ignored. {err}"
                     )
 
-    def load_ip_addresses(self, dev: device):
+    def load_ip_addresses(self, dev: device, primary_ip: str):
         """Load IP addresses from CloudVision."""
         dev_ip_intfs = cloudvision.get_ip_interfaces(client=self.conn, dId=dev.serial)
         for intf in dev_ip_intfs:
@@ -177,7 +181,7 @@ class CloudvisionAdapter(Adapter):
                 new_port = self.port(
                     name=intf["interface"],
                     device=dev.name,
-                    description=cloudvision.get_interface_description(
+                    description=cloudvision.get_routed_interface_description(
                         client=self.conn, dId=dev.serial, interface=intf["interface"]
                     ),
                     mac_addr="",
@@ -202,7 +206,7 @@ class CloudvisionAdapter(Adapter):
                     f"Attempting to load IP Address {intf['address']} for {intf['interface']} on {dev.name}."
                 )
             intf_vrf = cloudvision.get_interface_vrf(client=self.conn, dId=dev.serial, interface=intf["interface"])
-            if intf["address"] and intf["address"] != "none":
+            if intf["address"] and intf["address"] not in ["none", "0.0.0.0/0"]:
                 prefix = ipaddress.ip_interface(intf["address"]).network.with_prefixlen
                 self.get_or_instantiate(self.namespace, ids={"name": intf_vrf})
                 self.get_or_instantiate(
@@ -218,10 +222,10 @@ class CloudvisionAdapter(Adapter):
                 try:
                     self.add(new_ip)
                 except ObjectAlreadyExists as err:
-                    self.job.logger.warning(
-                        f"Unable to load {intf['address']} for {dev.name} on {intf['interface']}. {err}"
-                    )
-                    continue
+                    if self.job.debug:
+                        self.job.logger.info(
+                            f"Unable to load {intf['address']}. IPAddress already in diffsync store. {err}"
+                        )
                 self.get_or_instantiate(
                     self.ipassignment,
                     ids={
@@ -230,7 +234,7 @@ class CloudvisionAdapter(Adapter):
                         "device": dev.name,
                         "interface": intf["interface"],
                     },
-                    attrs={"primary": bool("Management" in intf["interface"])},
+                    attrs={"primary": str(ipaddress.ip_interface(intf["address"]).ip) == primary_ip},
                 )
 
     def load_device_tags(self, device):
@@ -250,13 +254,13 @@ class CloudvisionAdapter(Adapter):
             dev_tags.append({"label": "topology_type", "value": "-"})
 
         for tag in dev_tags:
-            if tag["label"] in ["hostname", "serialnumber", "Container"]:
+            if tag["label"] in ["hostname", "serialnumber", "Container", "vrf"]:
                 continue
             if tag["label"] == "mpls" or tag["label"] == "ztp":
-                tag["value"] = bool(distutils.util.strtobool(tag["value"]))
+                tag["value"] = is_truthy(tag["value"])
 
             if tag["value"] in ["true", "false"]:
-                tag["value"] = bool(distutils.util.strtobool(tag["value"]))
+                tag["value"] = is_truthy(tag["value"])
 
             try:
                 new_cf = self.cf(
@@ -266,7 +270,8 @@ class CloudvisionAdapter(Adapter):
                 )
                 self.add(new_cf)
             except ObjectAlreadyExists:
-                self.job.logger.warning(f"Duplicate tag encountered for {tag['label']} on device {device.name}")
+                if self.job.debug:
+                    self.job.logger.info(f"Duplicate tag encountered for {tag['label']} on device {device.name}")
             except ValidationError as ve:
                 self.job.logger.warning(f"Pydantic Validation Error for CustomField: {ve}")
 

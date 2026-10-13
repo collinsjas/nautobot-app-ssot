@@ -136,6 +136,10 @@ PLUGINS_CONFIG = {
     #     "session_cache_timeout": 3600,
     # },
     "nautobot_ssot": {
+        "contrib": {
+            "progress_logger_interval": 1000,
+            "enable_progress_logger": True,
+        },
         # Tag which will be created and applied to all synchronized objects.
         "aci_tag": os.getenv("NAUTOBOT_SSOT_ACI_TAG"),
         "aci_tag_color": os.getenv("NAUTOBOT_SSOT_ACI_TAG_COLOR"),
@@ -160,6 +164,13 @@ PLUGINS_CONFIG = {
         "aristacv_cvp_token": os.getenv("NAUTOBOT_ARISTACV_CVP_TOKEN", ""),
         "aristacv_cvp_user": os.getenv("NAUTOBOT_ARISTACV_CVP_USERNAME", ""),
         "aristacv_delete_devices_on_sync": is_truthy(os.getenv("NAUTOBOT_ARISTACV_DELETE_ON_SYNC", "false")),
+        "aristacv_delete_ipaddresses_on_sync": is_truthy(
+            os.getenv("NAUTOBOT_ARISTACV_DELETE_IPADDRESSES_ON_SYNC", "false")
+        ),
+        "aristacv_delete_namespaces_on_sync": is_truthy(
+            os.getenv("NAUTOBOT_ARISTACV_DELETE_NAMESPACES_ON_SYNC", "false")
+        ),
+        "aristacv_delete_prefixes_on_sync": is_truthy(os.getenv("NAUTOBOT_ARISTACV_DELETE_PREFIXES_ON_SYNC", "false")),
         "aristacv_from_cloudvision_default_device_role": "network",
         "aristacv_from_cloudvision_default_device_role_color": "ff0000",
         "aristacv_from_cloudvision_default_site": "cloudvision_imported",
@@ -214,11 +225,13 @@ PLUGINS_CONFIG = {
             "prefix": True,
             "scheduled_job": True,
             "custom_field": True,
+            "external_integration": True,
         },
         "citrix_adm_update_sites": is_truthy(os.getenv("NAUTOBOT_SSOT_CITRIX_ADM_UPDATE_SITES", "true")),
         "enable_aci": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_ACI")),
         "enable_aristacv": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_ARISTACV")),
         "enable_bootstrap": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_BOOTSTRAP", "false")),
+        "enable_cisco_sdwan": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_CISCO_SDWAN", "false")),
         "enable_citrix_adm": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_CITRIX_ADM")),
         "enable_device42": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_DEVICE42")),
         "enable_dna_center": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_DNA_CENTER")),
@@ -226,7 +239,7 @@ PLUGINS_CONFIG = {
         "enable_infoblox_uddi": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_INFOBLOX_UDDI")),
         "enable_ipfabric": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_IPFABRIC")),
         "enable_itential": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_ITENTIAL")),
-        "enable_librenms": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_LIBRENMS", "false")),
+        "enable_librenms": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_LIBRENMS")),
         "enable_meraki": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_MERAKI")),
         "enable_servicenow": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_SERVICENOW")),
         "enable_slurpit": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_SLURPIT")),
@@ -292,11 +305,26 @@ PLUGINS_CONFIG = {
         "ipfabric_use_canonical_interface_name": is_truthy(
             os.getenv("NAUTOBOT_SSOT_USE_CANONICAL_INTERFACE_NAME", "true")
         ),
+        "librenms_allow_ip_hostnames": is_truthy(os.getenv("NAUTOBOT_SSOT_LIBRENMS_ALLOW_IP_HOSTNAMES", "false")),
+        "librenms_show_failures": is_truthy(os.getenv("NAUTOBOT_SSOT_LIBRENMS_SHOW_FAILURES", "true")),
+        "librenms_permitted_values": {
+            "role": ["network"],
+        },
+        # Name Platforms after the network driver (cisco_ios) to share them with
+        # device-onboarding, instead of the Ansible FQCN (cisco.ios.ios). Docs cover migration.
+        "librenms_consolidated_platforms": is_truthy(
+            os.getenv("NAUTOBOT_SSOT_LIBRENMS_CONSOLIDATED_PLATFORMS", "false")
+        ),
+        # Override the bundled os -> driver mappings.
+        # {"iosxe": "cisco_ios"} declines the IOS-XE split; {"fortios": ""} suppresses a mapping.
+        "librenms_network_driver_map": {},
+        "meraki_allow_dhcp_mgmt_ips": is_truthy(os.getenv("NAUTOBOT_SSOT_MERAKI_ALLOW_DHCP_MGMT_IPS", "false")),
         "servicenow_instance": os.getenv("SERVICENOW_INSTANCE", ""),
         "servicenow_password": os.getenv("SERVICENOW_PASSWORD", ""),
         "servicenow_username": os.getenv("SERVICENOW_USERNAME", ""),
         "vsphere_url": os.getenv("NAUTOBOT_SSOT_VSPHERE_URL", "https://replace.me.local"),
         "vsphere_verify_ssl": is_truthy(os.getenv("NAUTOBOT_SSOT_VSPHERE_VERIFY_SSL", "false")),
+        "enable_global_search": is_truthy(os.getenv("NAUTOBOT_SSOT_ENABLE_GLOBAL_SEARCH", "true")),
     },
     "nautobot_device_lifecycle_mgmt": {
         "barchart_bar_width": float(os.environ.get("BARCHART_BAR_WIDTH", 0.1)),

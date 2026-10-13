@@ -15,6 +15,7 @@ __version__ = metadata.version(__name__)
 
 
 _CONFLICTING_APP_NAMES = [
+    "nautobot_sdwan_ssot",
     "nautobot_ssot_aci",
     "nautobot_ssot_aristacv",
     "nautobot_ssot_bootstrap",
@@ -39,10 +40,6 @@ def _check_for_conflicting_apps():
         )
 
 
-if not is_truthy(os.getenv("NAUTOBOT_SSOT_ALLOW_CONFLICTING_APPS", "False")):
-    _check_for_conflicting_apps()
-
-
 class NautobotSSOTAppConfig(NautobotAppConfig):
     """App configuration for the nautobot_ssot app."""
 
@@ -53,8 +50,6 @@ class NautobotSSOTAppConfig(NautobotAppConfig):
     description = "Nautobot app that enables Single Source of Truth.  Allows users to aggregate distributed data sources and/or distribute Nautobot data to other data sources such as databases and SDN controllers."
     base_url = "ssot"
     required_settings = []
-    min_version = "2.1.0"
-    max_version = "2.9999"
     default_settings = {
         "aci_tag": "",
         "aci_tag_color": "",
@@ -76,6 +71,9 @@ class NautobotSSOTAppConfig(NautobotAppConfig):
         "aristacv_cvp_token": "",
         "aristacv_cvp_user": "",
         "aristacv_delete_devices_on_sync": False,
+        "aristacv_delete_ipaddresses_on_sync": False,
+        "aristacv_delete_namespaces_on_sync": False,
+        "aristacv_delete_prefixes_on_sync": False,
         "aristacv_from_cloudvision_default_device_role": "",
         "aristacv_from_cloudvision_default_device_role_color": "",
         "aristacv_from_cloudvision_default_site": "",
@@ -85,6 +83,17 @@ class NautobotSSOTAppConfig(NautobotAppConfig):
         "aristacv_role_mappings": {},
         "aristacv_site_mappings": {},
         "aristacv_verify": True,
+        "cisco_sdwan_default_interface_status": "Active",
+        "cisco_sdwan_default_interface_type": "other",
+        "cisco_sdwan_default_ipaddress_status": "Active",
+        "cisco_sdwan_device_retired_status": "Retired",
+        "cisco_sdwan_excluded_interfaces": ["Loopback65528", "Loopback65529"],
+        "cisco_sdwan_excluded_prefixes": ["169.254.0.0/16"],
+        "cisco_sdwan_if_up_states": ["if-state-up", "up"],
+        "cisco_sdwan_null_ip_addresses": ["-", "0.0.0.0"],  # noqa: S104
+        "cisco_sdwan_null_mtu_values": ["0"],
+        "cisco_sdwan_primary_ip_interfaces": ["sdwan-system-intf"],
+        "cisco_sdwan_software_version_platform_name": None,
         "citrix_adm_update_sites": True,
         "device42_host": "",
         "device42_username": "",
@@ -104,6 +113,7 @@ class NautobotSSOTAppConfig(NautobotAppConfig):
         "enable_aci": False,
         "enable_aristacv": False,
         "enable_bootstrap": False,
+        "enable_cisco_sdwan": False,
         "enable_device42": False,
         "enable_dna_center": False,
         "enable_citrix_adm": False,
@@ -123,25 +133,37 @@ class NautobotSSOTAppConfig(NautobotAppConfig):
         "ipfabric_timeout": 15,
         "ipfabric_nautobot_host": "",
         "ipfabric_sync_ipf_dev_type_to_role": True,
+        "ipfabric_bulk_write_batch_size": 1000,
+        "librenms_allow_ip_hostnames": False,
+        "librenms_consolidated_platforms": False,
+        "librenms_network_driver_map": {},
+        "librenms_permitted_values": {},
+        "librenms_show_failures": True,
         "servicenow_instance": "",
         "servicenow_password": "",
         "servicenow_username": "",
+        "enable_global_search": True,
+        "skip_auto_component_creation": False,
     }
-    caching_config = {}
     config_view_name = "plugins:nautobot_ssot:config"
     docs_view_name = "plugins:nautobot_ssot:docs"
-    searchable_models = [
-        "Sync",
-        "SyncLogEntry",
-    ]
+    # `searchable_models` is intentionally not declared here; `ready()` assigns it from `enable_global_search`.
 
     def ready(self):
         """Trigger callback when database is ready."""
         super().ready()
-
         for module in each_enabled_integration_module("signals"):
             logger.debug("Registering signals for %s", module.__file__)
             module.register_signals(self)
+        if not is_truthy(os.getenv("NAUTOBOT_SSOT_ALLOW_CONFLICTING_APPS", "False")):
+            _check_for_conflicting_apps()
+
+        # Assign in both branches so no class-level default can leak through when global search is disabled.
+        # Nautobot expects lowercase model names and compares them as plain strings (`?model=nautobot_ssot.sync`).
+        if settings.PLUGINS_CONFIG.get("nautobot_ssot", {}).get("enable_global_search", True):
+            self.searchable_models = ["sync", "synclogentry"]
+        else:
+            self.searchable_models = []
 
 
 config = NautobotSSOTAppConfig  # pylint:disable=invalid-name

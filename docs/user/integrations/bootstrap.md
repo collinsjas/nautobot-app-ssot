@@ -13,6 +13,7 @@ Synchronization of data follows this workflow:
 5. If an object needs to be updated it will be updated with the values provided by Bootstrap data.
 6. If an object needs to be deleted it will be deleted.
 
+> Starting in SSoT 3.9.3, the Objects imported and updated by Bootstrap will have a [Object Metadata](https://docs.nautobot.com/projects/core/en/stable/user-guide/platform-functionality/objectmetadata/) created or updated to track the last update from Bootstrap.
 
 ### Bootstrap as DataTarget
 
@@ -28,35 +29,43 @@ Data values are generally normalized in the app code. If a value is supposed to 
 
 ```yaml
 secret:
-  - name: Github_Service_Acct
+  - name: Service_Acct_User
     provider: environment-variable # or text-file
     parameters:
-      variable: GITHUB_SERVICE_ACCT
+      variable: SERVICE_ACCT_USER
       path:
-  - name: Github_Service_Token
+  - name: Service_Acct_Token
     provider: environment-variable # or text-file
     parameters:
-      variable: GITHUB_SERVICE_TOKEN
+      variable: SERVICE_ACCT_TOKEN
+      path:
+  - name: Service_Acct_Password
+    provider: environment-variable # or text-file
+    parameters:
+      variable: SERVICE_ACCT_PASSWORD
       path:
 secrets_group:
-  - name: Github_Service_Account
+  - name: Service_Account
     secrets:
-      - name: Github_Service_Acct
+      - name: Service_Acct_User
         secret_type: username
         access_type: HTTP(S)
-      - name: Github_Service_Token
+      - name: Service_Acct_Token
         secret_type: token
+        access_type: HTTP(S)
+      - name: Service_Acct_Password
+        secret_type: password
         access_type: HTTP(S)
 git_repository:
   - name: "Backbone Config Contexts"
     url: "https://github.com/nautobot/backbone-config-contexts.git"
     branch: "main" #  if branch is defined it will be used instead of the "git_branch" in the "branch" variable file.
-    secrets_group_name: "Github_Service_Account"
+    secrets_group_name: "Service_Account"
     provided_data_type:
       - "config contexts"
   - name: "Datacenter Config Contexts"
     url: "https://github.com/nautobot/datacenter-config-contexts.git"
-    secrets_group_name: "Github_Service_Account"
+    secrets_group_name: "Service_Account"
     provided_data_type:
       - "config contexts"
 dynamic_group:
@@ -111,7 +120,7 @@ scheduled_job:
       cleanup_types: ["extras.ObjectChange"]
       max_age: 90
 software:
-  - device_platform: "arista_eos"
+  - platform: "arista_eos"
     version: "4.25.10M"
     alias:
     release_date: "2023-12-04"
@@ -135,12 +144,48 @@ validated_software:
     valid_until:
     preferred_version: false
     tags: []
+external_integration:
+  - name: "Altiplano"
+    remote_url: "https://my.altiplano.instance:45321"
+    verify_ssl: false
+    secrets_group: "Service_Account"
+    timeout: 30
+    headers:
+      Accept: "application/yang-data+json"
+      Content-Type: "application/yang-data+json"
+    extra_config:
+      device_types:
+        - "LS-SF-SFMB-A"
+      duid_prefixes_to_ignore:
+        - "9876"
 ```
+
+### Branch Specific Values
+If you are running multiple Nautobot environments, some values may need to be specific to the Nautobot environment. For example in `development` you might want all GitRepository objects to use the branch `develop`. Also for ScheduledJobs you might need to send specific UUID values as `job_vars`, which are unique to each Nautobot environment. You can create these 'branch values' that are specific to each object type. You will want to update your `PLUGINS_CONFIG` in `nautobot_config.py` to include the value you wish to use for the Branch Values File.
+
+```python
+PLUGINS_CONFIG = {
+    "nautobot_ssot": {
+        "bootstrap_nautobot_environment_branch": os.getenv("NAUTOBOT_BOOTSTRAP_SSOT_ENVIRONMENT_BRANCH", "develop"),
+    }
+}
+```
+
+Then create a YAML file in the same format as `global_settings.py`, to 'override' any specific object found in the Global Settings. If you wish to use a specific value for ALL object types, simply add an object with the `name` set to `default`, and it will take effect for all objects of that type that have a blank or missing value for that setting. If the object is already assigned a value, that value will take precedence over this default setting.
 
 #### develop.yml
 
 ```yaml
-git_branch: develop
+---
+git_repository: # Sets all git_repositories to this branch (if unspecified in global_settings)
+  - name: "default"
+    branch: "develop"
+# git_branch: "develop" # this method has been deprecated, use above method
+scheduled_job:
+  - name: "Test Scheduled Job" # Add job_vars with unique UUID's to a specific Job
+    job_vars:
+      integration: 1234567890
+      tenant: 987765412
 ```
 
 ## Content Types
@@ -240,8 +285,6 @@ There are a couple models like Tags and Git Repositories that have associated co
 - nautobot_device_lifecycle_mgmt.devicesoftwarevalidationresult
 - nautobot_device_lifecycle_mgmt.hardwarelcm
 - nautobot_device_lifecycle_mgmt.inventoryitemsoftwarevalidationresult
-- nautobot_device_lifecycle_mgmt.softwareimagelcm
-- nautobot_device_lifecycle_mgmt.softwarelcm
 - nautobot_device_lifecycle_mgmt.validatedsoftwarelcm
 - nautobot_device_lifecycle_mgmt.vulnerabilitylcm
 - nautobot_golden_config.compliancefeature
@@ -322,8 +365,8 @@ location:
     tenant:  # str
     physical_address:  # str
     shipping_address:  # str
-    latitude:  # str
-    longitude:  # str
+    latitude:  # float
+    longitude:  # float
     contact_name:  # str
     contact_phone:  # str
     contact_email:  # str
@@ -814,7 +857,7 @@ Create Software objects. Uses the following data structure:
 
 ```yaml
 software:
-  - device_platform: # str
+  - platform: # str
     status: * # str
     version: # str
     alias: # str
@@ -826,7 +869,7 @@ software:
     tags: [] # List[str]
 ```
 
-The `device_platform` key must be a Platform that exists in Nautobot or is created by this plugin. The date fields `release_date` and `eos_date` need to be formatted YYYY-MM-DD in order to properly import. Fields with a * are required if on Nautobot version 2.3.0 or later as the models moved to Core from the Device LifeCycle app and added additional required fields.
+The `platform` key must be a Platform that exists in Nautobot or is created by this plugin. The date fields `release_date` and `eos_date` need to be formatted YYYY-MM-DD in order to properly import. Fields with a * are required if on Nautobot version 2.3.0 or later as the models moved to Core from the Device LifeCycle app and added additional required fields.
 
 ### SoftwareImage
 
@@ -873,3 +916,22 @@ validated_software:
 ```
 
 The `software:` key is a reference to the platform and software version of a Software object that already exists in Nautobot (or is created by this plugin). The `valid_since` and `valid_until` fields must dates in YYYY-MM-DD format. The `devices`, `device_types`, `device_roles`, `inventory_items`, and `object_tags` are all lists of objects to apply the validated software to for validation against what is currently running on the device.
+
+### ExternalIntegration
+
+Create ExternalIntegration objects. Uses the following data structure, only `name`, `remote_url`, and `timeout` are required. Any external_integrations not included in the Bootstrap `global_settings.yaml` file may be deleted.
+
+```yaml
+external_integration:
+  - name: # str
+    remote_url: # str
+    timeout: # int
+    # Optional Arguments
+    verify_ssl: # bool, default: True
+    secrets_group: # str
+    headers: {} # dict
+    http_method: # str -- Options are: get, post, put, patch, delete
+    ca_file_path: # str
+    extra_config: {} # dict
+    tags: [] # List[str]
+```

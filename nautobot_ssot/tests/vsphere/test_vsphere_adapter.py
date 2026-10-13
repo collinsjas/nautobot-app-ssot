@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from unittest.mock import Mock
 
 from nautobot_ssot.integrations.vsphere.diffsync.adapters.adapter_vsphere import (
     VsphereDiffSync,
@@ -29,10 +30,16 @@ class TestVsphereAdapter(unittest.TestCase):
                 cluster_filters=None,
             )
 
+    def resp_with_json(self, path):
+        """Generator for mock responses with JSON data."""
+        r = Mock()
+        r.json.return_value = json_fixture(path)
+        return r
+
     def test_load_clustergroups(self):
-        mock_response = unittest.mock.MagicMock()
-        mock_response.json.return_value = json_fixture(f"{FIXTURES}/get_datacenters.json")
-        self.vsphere_adapter.client.get_datacenters.return_value = mock_response
+        self.vsphere_adapter.client.get_datacenters.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_datacenters.json"
+        )
         self.vsphere_adapter.load_cluster_groups()
         clustergroup = self.vsphere_adapter.get("clustergroup", "CrunchyDatacenter")
         self.assertEqual(clustergroup.name, "CrunchyDatacenter")
@@ -43,9 +50,9 @@ class TestVsphereAdapter(unittest.TestCase):
         self.vsphere_adapter.load_cluster_groups = mock_response_clustergroup
         self.vsphere_adapter.get_or_instantiate(self.vsphere_adapter.clustergroup, {"name": "CrunchyDatacenter"})
 
-        mock_response_clusters = unittest.mock.MagicMock()
-        mock_response_clusters.json.return_value = json_fixture(f"{FIXTURES}/get_clusters.json")
-        self.vsphere_adapter.client.get_clusters_from_dc.return_value = mock_response_clusters
+        self.vsphere_adapter.client.get_clusters_from_dc.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_clusters.json"
+        )
         self.vsphere_adapter.load_data()
 
         cluster = self.vsphere_adapter.get("cluster", "HeshLawCluster")
@@ -54,9 +61,9 @@ class TestVsphereAdapter(unittest.TestCase):
         self.assertEqual(cluster.cluster_group__name, "CrunchyDatacenter")
 
     def test_load_virtualmachines(self):
-        mock_response_cluster = unittest.mock.MagicMock()
-        mock_response_cluster.json.return_value = json_fixture(f"{FIXTURES}/get_vms_from_cluster.json")
-        self.vsphere_adapter.client.get_vms_from_cluster.return_value = mock_response_cluster
+        self.vsphere_adapter.client.get_vms_from_cluster.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_vms_from_cluster.json"
+        )
 
         mock_response_vm_details = unittest.mock.MagicMock()
         mock_response_vm_details.json.side_effect = [
@@ -79,6 +86,13 @@ class TestVsphereAdapter(unittest.TestCase):
             {"name": "HeshLawCluster", "cluster_type__name": "VMWare vSphere"},
         )
 
+        self.vsphere_adapter.tag_map = {
+            "urn:vmomi:InventoryServiceTag:cb703991-b580-4751-ae2d-22c70a426311:GLOBAL": {
+                "name": "Owner__EEE",
+                "associations": [{"type": "VirtualMachine", "id": "vm-1012"}],
+            }
+        }
+
         self.vsphere_adapter.load_virtualmachines(cluster_json_info, diffsync_cluster)
         vm1 = self.vsphere_adapter.get(
             "virtual_machine",
@@ -93,6 +107,8 @@ class TestVsphereAdapter(unittest.TestCase):
         self.assertEqual(vm1.cluster__name, "HeshLawCluster")
         self.assertEqual(vm1.primary_ip4__host, "192.168.2.88")
         self.assertEqual(vm1.primary_ip6__host, None)
+        self.assertEqual(len(vm1.tags), 2)
+        self.assertIn("Owner__EEE", [tag["name"] for tag in vm1.tags])
 
         vm2 = self.vsphere_adapter.get("virtual_machine", {"name": "Nautobot", "cluster__name": "HeshLawCluster"})
         self.assertEqual(vm2.name, "Nautobot")
@@ -102,6 +118,54 @@ class TestVsphereAdapter(unittest.TestCase):
         self.assertEqual(vm2.status__name, "Active")
         self.assertEqual(vm2.cluster__name, "HeshLawCluster")
         self.assertEqual(vm2.primary_ip4__host, "172.18.0.1")
+        self.assertEqual(len(vm2.tags), 1)
+        self.assertIn("SSoT Synced from vSphere", [tag["name"] for tag in vm2.tags])
+
+    def test_load_virtualmachines_skips_duplicate_name(self):
+        """Duplicate VM names within a cluster are warned and skipped instead of crashing.
+
+        Regression test #1236. vSphere allows multiple VMs with the same name in a cluster,
+        but Nautobot's VirtualMachine is unique on (cluster, tenant, name). Before
+        this guard, the second same-named VM resolved to the existing diffsync VM and
+        load_vm_interfaces raised ObjectAlreadyExists on add_child.
+        """
+        self.vsphere_adapter.client.get_vms_from_cluster.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_vms_from_cluster_duplicate.json"
+        )
+
+        mock_response_vm_details = unittest.mock.MagicMock()
+        mock_response_vm_details.json.side_effect = [
+            json_fixture(f"{FIXTURES}/vm_details_nautobot.json"),
+            json_fixture(f"{FIXTURES}/vm_details_nautobot.json"),
+        ]
+        self.vsphere_adapter.client.get_vm_details.return_value = mock_response_vm_details
+
+        mock_response_get_vm_interfaces = unittest.mock.MagicMock()
+        mock_response_get_vm_interfaces.json.side_effect = [
+            json_fixture(f"{FIXTURES}/get_vm_interfaces.json"),
+        ]
+        self.vsphere_adapter.client.get_vm_interfaces.return_value = mock_response_get_vm_interfaces
+
+        cluster_json_info = {"cluster": "domain-c123", "name": "HeshLawCluster"}
+        diffsync_cluster, _ = self.vsphere_adapter.get_or_instantiate(
+            self.vsphere_adapter.cluster,
+            {"name": "HeshLawCluster", "cluster_type__name": "VMWare vSphere"},
+        )
+
+        self.vsphere_adapter.load_virtualmachines(cluster_json_info, diffsync_cluster)
+
+        vms = [
+            vm
+            for vm in self.vsphere_adapter.get_all("virtual_machine")
+            if vm.name == "DuplicateNamedVM" and vm.cluster__name == "HeshLawCluster"
+        ]
+        self.assertEqual(len(vms), 1)
+        warning_calls = [
+            call_args
+            for call_args in self.vsphere_adapter.job.logger.warning.call_args_list
+            if "Duplicate Virtual Machine name 'DuplicateNamedVM'" in call_args.args[0]
+        ]
+        self.assertEqual(len(warning_calls), 1)
 
     def test_load_vm_interfaces(self):
         vm_detail_json = json_fixture(f"{FIXTURES}/vm_details_nautobot.json")["value"]
@@ -157,7 +221,12 @@ class TestVsphereAdapter(unittest.TestCase):
             diffsync_vminterface,
             diffsync_virtualmachine,
         )
-        vm_ip = self.vsphere_adapter.get("ip_address", "192.168.2.88__23__Active")
+        self.vsphere_adapter.load_ip_map()
+
+        vm_ip = self.vsphere_adapter.get(
+            "ip_address",
+            "192.168.2.88__23__Active",
+        )
         self.assertEqual(vm_ip.host, "192.168.2.88")
         self.assertEqual(vm_ip.mask_length, 23)
         self.assertEqual(vm_ip.status__name, "Active")
@@ -166,8 +235,106 @@ class TestVsphereAdapter(unittest.TestCase):
             [{"name": "Network adapter 1", "virtual_machine__name": "Nautobot"}],
         )
 
-        prefix = self.vsphere_adapter.get("prefix", "192.168.2.0__23__Global__Active")
+        prefix = self.vsphere_adapter.get(
+            "prefix",
+            "192.168.2.0__23__Global__Active",
+        )
         self.assertEqual(prefix.network, "192.168.2.0")
         self.assertEqual(prefix.prefix_length, 23)
         self.assertEqual(prefix.namespace__name, "Global")
         self.assertEqual(prefix.type, "network")
+
+    def test_load_ipv6_addresses(self):
+        mock_interfaces = unittest.mock.MagicMock()
+        mock_interfaces.json.return_value = json_fixture(f"{FIXTURES}/get_vm_interfaces_ipv6.json")
+        diffsync_virtualmachine, _ = self.vsphere_adapter.get_or_instantiate(
+            self.vsphere_adapter.virtual_machine,
+            {"name": "Nautobot", "cluster__name": "HeshLawCluster"},
+            {
+                "vcpus": 10,
+                "memory": 49152,
+                "disk": 64,
+                "status__name": "Active",
+            },
+        )
+        diffsync_vminterface, _ = self.vsphere_adapter.get_or_instantiate(
+            self.vsphere_adapter.interface,
+            {"name": "Network adapter 1", "virtual_machine__name": "Nautobot"},
+            {
+                "enabled": False,
+                "mac_address": "00:50:56:b5:e5:5f",
+                "status__name": "Active",
+            },
+        )
+
+        self.vsphere_adapter.load_ip_addresses(
+            mock_interfaces.json()["value"],
+            "00:50:56:b5:e5:5f",
+            diffsync_vminterface,
+            diffsync_virtualmachine,
+        )
+
+        # Must call load_ip_map to populate the IP since I'm deferring it.
+        self.vsphere_adapter.load_ip_map()
+        vm_ip = self.vsphere_adapter.get(
+            "ip_address",
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334__64__Active",
+        )
+        self.assertEqual(vm_ip.host, "2001:0db8:85a3:0000:0000:8a2e:0370:7334")
+        self.assertEqual(vm_ip.mask_length, 64)
+        self.assertEqual(vm_ip.status__name, "Active")
+        self.assertEqual(
+            vm_ip.vm_interfaces,
+            [{"name": "Network adapter 1", "virtual_machine__name": "Nautobot"}],
+        )
+
+        prefix = self.vsphere_adapter.get("prefix", "2001:db8:85a3::__64__Global__Active")
+        self.assertEqual(prefix.network, "2001:db8:85a3::")
+        self.assertEqual(prefix.prefix_length, 64)
+        self.assertEqual(prefix.namespace__name, "Global")
+        self.assertEqual(prefix.type, "network")
+
+    def test_load_tags(self):
+        """Test loading tags from vSphere."""
+        self.vsphere_adapter.client.get_tags.return_value = self.resp_with_json(f"{FIXTURES}/get_tags.json")
+        self.vsphere_adapter.client.get_tag_associations.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_tag_associations.json"
+        )
+        self.vsphere_adapter.client.get_tag_details.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_tag_details.json"
+        )
+        self.vsphere_adapter.client.get_category_details.return_value = self.resp_with_json(
+            f"{FIXTURES}/get_category_details.json"
+        )
+
+        self.vsphere_adapter.load_tags()
+        tags = self.vsphere_adapter.get_all("tag")
+        self.assertEqual(len(tags), 1)
+        self.assertIn("Owner__EEE", [tag.name for tag in tags])
+
+    def test_load_tags_skips_when_name_and_category_missing(self):
+        """Tags associated to VMs but without tag or category name are skipped with a warning."""
+        tag_id = "urn:vmomi:InventoryServiceTag:bad-tag:GLOBAL"
+        get_tags_resp = Mock()
+        get_tags_resp.json.return_value = [tag_id]
+        self.vsphere_adapter.client.get_tags.return_value = get_tags_resp
+
+        assoc_resp = Mock()
+        assoc_resp.json.return_value = [{"type": "VirtualMachine", "id": "vm-1"}]
+        self.vsphere_adapter.client.get_tag_associations.return_value = assoc_resp
+
+        tag_details_resp = Mock()
+        tag_details_resp.json.return_value = {"category_id": "cat-1", "description": ""}
+        self.vsphere_adapter.client.get_tag_details.return_value = tag_details_resp
+
+        category_resp = Mock()
+        category_resp.json.return_value = {}
+        self.vsphere_adapter.client.get_category_details.return_value = category_resp
+
+        self.vsphere_adapter.load_tags()
+
+        self.vsphere_adapter.job.log_warning.assert_called_once_with(
+            message=f"Skipping vSphere tag {tag_id} with missing name and category."
+        )
+        self.assertNotIn(tag_id, self.vsphere_adapter.tag_map)
+        self.assertEqual(len(self.vsphere_adapter.get_all("tag")), 0)

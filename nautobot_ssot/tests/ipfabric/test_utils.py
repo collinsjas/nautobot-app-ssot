@@ -1,9 +1,11 @@
 """Tests for IPFabric utilities.utils."""
 
+import threading
+
 from django.test import SimpleTestCase
 
-from nautobot_ssot.integrations.ipfabric.constants import DEFAULT_INTERFACE_TYPE
 from nautobot_ssot.integrations.ipfabric.utilities import utils
+from nautobot_ssot.integrations.ipfabric.utilities.utils import job_scoped_cache
 
 
 class TestUtils(SimpleTestCase):  # pylint: disable=too-many-public-methods
@@ -100,8 +102,18 @@ class TestUtils(SimpleTestCase):  # pylint: disable=too-many-public-methods
     def test_eight_hundred_gig_default_uses_osfp_interface(self):
         self.assertEqual("800gbase-x-osfp", utils.convert_media_type("800G", "EiHunGi1"))
 
-    def test_unknown_interface_uses_default_interface(self):
-        self.assertEqual(DEFAULT_INTERFACE_TYPE, utils.convert_media_type("ThisShouldGiveTheDefault", ""))
+    def test_a_media_type_nothing_maps_and_a_name_nothing_matches_resolve_to_nothing(self):
+        """None rather than a default, which would be indistinguishable from a real resolution."""
+        self.assertIsNone(utils.convert_media_type("ThisMapsToNothing", "ThisMatchesNothing"))
+
+    def test_a_media_type_nothing_maps_falls_back_to_the_interface_name(self):
+        """The name is the only other thing that says what the port is, so it is worth asking."""
+        self.assertEqual("virtual", utils.convert_media_type("ThisMapsToNothing", "Vlan100"))
+        self.assertEqual("lag", utils.convert_media_type("unknown", "Port-channel1"))
+
+    def test_a_media_type_that_maps_wins_over_the_name(self):
+        """What the platform reports about the port beats what its name implies."""
+        self.assertEqual("10gbase-x-sfpp", utils.convert_media_type("10GBase SFP", "GigabitEthernet1"))
 
     def test_interface_name_lag(self):
         self.assertEqual("lag", utils.convert_media_type("", "Po1"))
@@ -152,3 +164,164 @@ class TestUtils(SimpleTestCase):  # pylint: disable=too-many-public-methods
 
     def test_interface_name_twohundredgigethernet(self):
         self.assertEqual("200gbase-x-qsfp56", utils.convert_media_type("", "TwoHundredGigabitEthernet1"))
+
+
+class TestJobScopedCache(SimpleTestCase):
+    """Test the `job_scoped_cache` decorator class."""
+
+    def setUp(self):
+        """Ensure no leaked state from other tests."""
+        job_scoped_cache.clear_all()
+
+    def test_cache_hit_returns_same_object(self):
+        """Second call with same args returns the cached result (no second invocation)."""
+        call_count = {"n": 0}
+
+        @job_scoped_cache
+        def make_obj(x):
+            call_count["n"] += 1
+            return [x]
+
+        first = make_obj(1)
+        second = make_obj(1)
+        self.assertIs(first, second)
+        self.assertEqual(call_count["n"], 1)
+
+    def test_cache_miss_for_different_args(self):
+        """Different args produce different cached entries; no false hits."""
+
+        @job_scoped_cache
+        def make_obj(x):
+            return [x]
+
+        a = make_obj(1)
+        b = make_obj(2)
+        self.assertIsNot(a, b)
+        self.assertEqual(a, [1])
+        self.assertEqual(b, [2])
+
+    def test_cache_clear_resets_instance(self):
+        """`cache_clear()` on one instance forces the next call to re-invoke the function."""
+        call_count = {"n": 0}
+
+        @job_scoped_cache
+        def make_obj(x):
+            call_count["n"] += 1
+            return [x]
+
+        first = make_obj(1)
+        make_obj.cache_clear()
+        second = make_obj(1)
+        self.assertIsNot(first, second)
+        self.assertEqual(call_count["n"], 2)
+
+    def test_cache_info_reports_hits_misses_and_size(self):
+        """`cache_info()` accurately reports hits, misses, and current size."""
+
+        @job_scoped_cache
+        def make_obj(x):
+            return [x]
+
+        make_obj(1)  # miss
+        make_obj(1)  # hit
+        make_obj(2)  # miss
+        info = make_obj.cache_info()
+        self.assertEqual(info.hits, 1)
+        self.assertEqual(info.misses, 2)
+        self.assertEqual(info.currsize, 2)
+        self.assertIsNone(info.maxsize)
+
+    def test_clear_all_resets_every_instance(self):
+        """`clear_all()` resets caches on every registered instance."""
+
+        @job_scoped_cache
+        def first(x):
+            return [x]
+
+        @job_scoped_cache
+        def second(x):
+            return {x}
+
+        first(1)
+        second(2)
+        self.assertEqual(first.cache_info().currsize, 1)
+        self.assertEqual(second.cache_info().currsize, 1)
+
+        job_scoped_cache.clear_all()
+
+        self.assertEqual(first.cache_info().currsize, 0)
+        self.assertEqual(second.cache_info().currsize, 0)
+
+    def test_maxsize_keeps_only_the_most_recent_entries(self):
+        """Results too large to hold one of per key need a bound, or a long run accumulates them."""
+        calls = []
+
+        @job_scoped_cache(maxsize=2)
+        def bounded(x):
+            calls.append(x)
+            return [x]
+
+        job_scoped_cache.clear_all()
+        bounded(1)
+        bounded(2)
+        self.assertEqual(bounded.cache_info().currsize, 2)
+
+        bounded(3)  # evicts the oldest, which is 1
+        self.assertEqual(bounded.cache_info().currsize, 2)
+
+        bounded(2)  # still held, so no new call
+        bounded(1)  # evicted, so called again
+        self.assertEqual(calls, [1, 2, 3, 1])
+
+    def test_without_maxsize_the_cache_is_unbounded(self):
+        @job_scoped_cache
+        def unbounded(x):
+            return [x]
+
+        job_scoped_cache.clear_all()
+        for value in range(5):
+            unbounded(value)
+        self.assertEqual(unbounded.cache_info().currsize, 5)
+
+    def test_clear_group_only_clears_named_group(self):
+        """`clear_group()` clears the named group's caches and leaves others intact."""
+
+        @job_scoped_cache(group="alpha")
+        def in_group(x):
+            return [x]
+
+        @job_scoped_cache
+        def ungrouped(x):
+            return [x]
+
+        in_group(1)
+        ungrouped(1)
+        self.assertEqual(in_group.cache_info().currsize, 1)
+        self.assertEqual(ungrouped.cache_info().currsize, 1)
+
+        job_scoped_cache.clear_group("alpha")
+
+        self.assertEqual(in_group.cache_info().currsize, 0, "group-cleared cache should be empty")
+        self.assertEqual(ungrouped.cache_info().currsize, 1, "ungrouped cache must remain intact")
+
+    def test_thread_local_isolation(self):
+        """Each thread gets its own cache store; entries do not leak across threads."""
+
+        @job_scoped_cache
+        def make_obj(x):
+            return [x]
+
+        main_result = make_obj(1)
+        other_thread_result = []
+
+        def in_thread():
+            other_thread_result.append(make_obj(1))
+
+        worker = threading.Thread(target=in_thread)
+        worker.start()
+        worker.join()
+
+        self.assertEqual(len(other_thread_result), 1)
+        # Different threads -> separate cache stores -> separate fresh objects with equal values.
+        self.assertIsNot(main_result, other_thread_result[0])
+        self.assertEqual(main_result, other_thread_result[0])

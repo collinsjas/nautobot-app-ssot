@@ -128,42 +128,6 @@ class GraphQLQuery(DiffSyncModel):
     uuid: Optional[UUID] = None
 
 
-# TODO Merge SoftwareVersion and Software once no longer need to support DLM < 2.0.0 and Nautobot < 2.3.0
-class Software(DiffSyncModel):
-    """DiffSync Model for Bootstrap Software."""
-
-    _modelname = "software"
-    _identifiers = (
-        "version",
-        "platform",
-    )
-    _attributes = (
-        "alias",
-        "release_date",
-        "eos_date",
-        "long_term_support",
-        "pre_release",
-        "documentation_url",
-        "tags",
-        "system_of_record",
-    )
-    _children = {}
-
-    version: str
-    platform: str
-    alias: Optional[str] = None
-    release_date: Optional[datetime.date] = None
-    eos_date: Optional[datetime.date] = None
-    documentation_url: Optional[str] = None
-    long_term_support: bool
-    pre_release: bool
-    tags: Optional[List[str]] = None
-    system_of_record: str
-
-    uuid: Optional[UUID] = None
-
-
-# TODO Merge SoftwareVersion and Software once no longer need to support DLM < 2.0.0 and Nautobot < 2.3.0
 class SoftwareVersion(DiffSyncModel):
     """DiffSync Model for Bootstrap SoftwareVersion."""
 
@@ -200,40 +164,6 @@ class SoftwareVersion(DiffSyncModel):
     uuid: Optional[UUID] = None
 
 
-# TODO Merge SoftwareImage and SoftwareImageFile once no longer need to support DLM < 2.0.0 and Nautobot < 2.3.0
-class SoftwareImage(DiffSyncModel):
-    """DiffSync Model for Bootstrap SoftwareImage."""
-
-    _modelname = "software_version"
-    _identifiers = ("software",)
-    _attributes = (
-        "platform",
-        "software_version",
-        "file_name",
-        "download_url",
-        "image_file_checksum",
-        "hashing_algorithm",
-        "default_image",
-        "tags",
-        "system_of_record",
-    )
-    _children = {}
-
-    software: str
-    platform: str
-    software_version: str
-    file_name: str
-    download_url: Optional[str] = None
-    image_file_checksum: Optional[str] = None
-    hashing_algorithm: str
-    default_image: bool
-    tags: Optional[List[str]] = None
-    system_of_record: str
-
-    uuid: Optional[UUID] = None
-
-
-# TODO Merge SoftwareImage and SoftwareImageFile once no longer need to support DLM < 2.0.0 and Nautobot < 2.3.0
 class SoftwareImageFile(DiffSyncModel):
     """DiffSync Model for Bootstrap SoftwareImageFile."""
 
@@ -848,7 +778,6 @@ class ScheduledJob(DiffSyncModel):
         "crontab",
         "job_vars",
         "profile",
-        "approval_required",
         "task_queue",
         "enabled",
     )
@@ -862,7 +791,6 @@ class ScheduledJob(DiffSyncModel):
     crontab: str
     job_vars: dict
     profile: bool = False
-    approval_required: bool = False
     task_queue: Optional[str] = None
     enabled: Optional[bool] = True
 
@@ -898,7 +826,6 @@ class CustomField(DiffSyncModel):
     weight: int
     filter_logic: str
     advanced_ui: bool
-    validation_regex: str
     required: bool = False
     content_types: List[str] = []
     custom_field_choices: Optional[list] = []
@@ -906,6 +833,40 @@ class CustomField(DiffSyncModel):
     validation_maximum: Optional[int] = None
     validation_regex: Optional[str] = None
     default: Optional[Union[str, bool, dict]] = None
+
+    uuid: Optional[UUID] = None
+
+
+class ExternalIntegration(DiffSyncModel):
+    """DiffSync model for External Integrations."""
+
+    _modelname = "external_integration"
+    _identifiers = ("name",)
+    _attributes = (
+        "remote_url",
+        "timeout",
+        "verify_ssl",
+        "secrets_group",
+        "headers",
+        "http_method",
+        "ca_file_path",
+        "extra_config",
+        "tags",
+        "system_of_record",
+    )
+    _children = {}
+
+    name: str
+    remote_url: str
+    timeout: int
+    verify_ssl: bool = True
+    secrets_group: Optional[str] = None
+    headers: Optional[dict] = None
+    http_method: Optional[str] = None
+    ca_file_path: Optional[str] = None
+    extra_config: Optional[dict] = None
+    tags: Optional[List[str]] = None
+    system_of_record: str
 
     uuid: Optional[UUID] = None
 

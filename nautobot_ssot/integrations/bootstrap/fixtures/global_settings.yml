@@ -382,35 +382,43 @@ circuit_termination:
     description: ""
     tags: []
 secret:
-  - name: "Github_Service_Acct"
+  - name: "Service_Acct_User"
     provider: "environment-variable"  # or text-file
     parameters:
-      variable: "GITHUB_SERVICE_ACCT"
+      variable: "SERVICE_ACCT_USER"
       path:
-  - name: "Github_Service_Token"
+  - name: "Service_Acct_Token"
     provider: "environment-variable"  # or text-file
     parameters:
-      variable: "GITHUB_SERVICE_TOKEN"
+      variable: "SERVICE_ACCT_TOKEN"
+      path:
+  - name: "Service_Acct_Password"
+    provider: "environment-variable"  # or text-file
+    parameters:
+      variable: "SERVICE_ACCT_PASSWORD"
       path:
 secrets_group:
-  - name: "Github_Service_Account"
+  - name: "Service_Account"
     secrets:
-      - name: "Github_Service_Acct"
+      - name: "Service_Acct_User"
         secret_type: "username"
         access_type: "HTTP(S)"
-      - name: "Github_Service_Token"
+      - name: "Service_Acct_Token"
         secret_type: "token"
+        access_type: "HTTP(S)"
+      - name: "Service_Acct_Password"
+        secret_type: "password"
         access_type: "HTTP(S)"
 git_repository:
   - name: "Backbone Config Contexts"
     url: "https://github.com/nautobot/backbone-config-contexts.git"
     branch: "main"
-    secrets_group_name: "Github_Service_Account"
+    secrets_group_name: "Service_Account"
     provided_data_type:
       - "config contexts"
   - name: "Datacenter Config Contexts"
     url: "https://github.com/nautobot/datacenter-config-contexts.git"
-    secrets_group_name: "Github_Service_Account"
+    secrets_group_name: "Service_Account"
     provided_data_type:
       - "config contexts"
   - name: "Metro Config Contexts"
@@ -538,7 +546,7 @@ graph_ql_query:
         }
       }
 software:
-  - device_platform: "arista_eos"
+  - platform: "arista_eos"
     status: "Active"
     version: "4.25.10M"
     alias: ""
@@ -548,7 +556,7 @@ software:
     lts: false
     pre_release: false
     tags: ["Backbone"]
-  - device_platform: "cisco_ios"
+  - platform: "cisco_ios"
     status: "Active"
     version: "03.11.04.E"
     alias: "Cisco Validated"
@@ -558,7 +566,7 @@ software:
     lts: false
     pre_release: false
     tags: ["Test"]
-  - device_platform: "paloalto_panos"
+  - platform: "paloalto_panos"
     status: "Active"
     version: "11.0.3"
     alias: "Panos Preferred"
@@ -568,7 +576,7 @@ software:
     lts: false
     pre_release: false
     tags: ["Test"]
-  - device_platform: "arista_eos"
+  - platform: "arista_eos"
     status: "Active"
     version: "15.4.3"
     alias: "Arista Preferred"
@@ -589,7 +597,7 @@ software_image:
     image_file_checksum: ""
     hashing_algorithm: "SHA256"
     default_image: false
-    device_types: ["arista-switch"]
+    device_types: []
     tags: ["Test"]
   - software: "paloalto_panos - 11.0.3"
     status: "Active"
@@ -828,7 +836,7 @@ prefix:
 scheduled_job:
   - name: "Test Scheduled Job"
     interval: "daily"
-    start_time: "2025-01-28T23:00:00+00:00"
+    start_time: "2025-12-28 23:00:00+00:00"
     job_model: "Export Object List"
     user: "admin"
 custom_field:
@@ -837,3 +845,18 @@ custom_field:
     description: "Circuit ID for internal records"
     content_types:
       - "circuits.circuit"
+external_integration:
+  - name: "Test Integration"
+    remote_url: "https://my.integration.instance:45321"
+    verify_ssl: false
+    secrets_group: "Service_Account"
+    http_method: "GET"
+    ca_file_path: "/tmp/test"
+    timeout: 30
+    headers:
+      Accept: "application/yang-data+json"
+      Content-Type: "application/yang-data+json"
+    extra_config:
+      test_extra_config:
+        - "extra_value"
+    tags: []

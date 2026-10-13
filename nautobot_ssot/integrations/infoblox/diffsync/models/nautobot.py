@@ -1,8 +1,11 @@
 """Nautobot Models for Infoblox integration with SSoT app."""
 
+import functools
+
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.utils.text import slugify
 from nautobot.extras.choices import CustomFieldTypeChoices
 from nautobot.extras.models import CustomField as OrmCF
@@ -37,7 +40,7 @@ from nautobot_ssot.integrations.infoblox.utils.diffsync import (
 from nautobot_ssot.integrations.infoblox.utils.nautobot import get_prefix_vlans
 
 
-def process_ext_attrs(adapter, obj: object, extattrs: dict):  # pylint: disable=too-many-branches
+def process_ext_attrs(adapter, obj: object, extattrs: dict):  # pylint: disable=too-many-branches,too-many-statements
     """Process Extensibility Attributes into Custom Fields or link to found objects.
 
     Args:
@@ -45,29 +48,34 @@ def process_ext_attrs(adapter, obj: object, extattrs: dict):  # pylint: disable=
         obj (object): The object that's being created or updated and needs processing.
         extattrs (dict): The Extensibility Attributes to be analyzed and applied to passed `prefix`.
     """
+    location_ext_attr = (getattr(adapter.config, "infoblox_location_ext_attr", "") or "").lower()
+    location_attr_names = [location_ext_attr] if location_ext_attr else ["site", "facility", "location"]
+
     for attr, attr_value in extattrs.items():  # pylint: disable=too-many-nested-blocks
         if attr_value:
-            if attr.lower() in ["site", "facility", "location"]:
-                if version.parse(settings.VERSION) < version.parse("2.2.0"):
-                    try:
-                        obj.location = adapter.location_map[attr_value]
-                    except KeyError as err:
-                        adapter.job.logger.warning(
-                            f"Unable to find Location {attr_value} for {obj} found in Extensibility Attributes '{attr}'. {err}"
-                        )
-                    except TypeError as err:
-                        adapter.job.logger.warning(
-                            f"Cannot set location values {attr_value} for {obj}. Multiple locations are assigned "
-                            f"in Extensibility Attributes '{attr}', but multiple location assignments are not "
-                            f"supported by Nautobot. {err}"
-                        )
+            if attr.lower() in location_attr_names:
+                if isinstance(attr_value, list):
+                    adapter.job.logger.warning(
+                        f"Cannot set location values {attr_value} for {obj}. Multiple locations are assigned "
+                        f"in Extensibility Attributes '{attr}', but multiple location assignments are not "
+                        f"supported by Nautobot."
+                    )
                 else:
-                    try:
-                        obj.locations.add(adapter.location_map[attr_value])
-                    except KeyError as err:
+                    location_entry = adapter.location_map.get(str(attr_value).lower())
+                    if not location_entry:
                         adapter.job.logger.warning(
-                            f"Unable to find Location {attr_value} for {obj} found in Extensibility Attributes '{attr}'. {err}"
+                            f"Unable to find Location {attr_value} for {obj} found in Extensibility Attributes '{attr}'."
                         )
+                    elif obj._meta.model_name not in location_entry["content_types"]:
+                        adapter.job.logger.warning(
+                            f"Location {attr_value} (LocationType '{location_entry['location_type']}') is not "
+                            f"permitted to contain {obj._meta.verbose_name} objects; skipping location assignment "
+                            f"for {obj} found in Extensibility Attributes '{attr}'."
+                        )
+                    elif version.parse(settings.VERSION) < version.parse("2.2.0"):
+                        obj.location_id = location_entry["id"]
+                    else:
+                        transaction.on_commit(functools.partial(obj.locations.add, location_entry["id"]))
             if attr.lower() == "vrf":
                 if isinstance(attr_value, list):
                     for vrf in attr_value:
@@ -117,6 +125,8 @@ def process_ext_attrs(adapter, obj: object, extattrs: dict):  # pylint: disable=
                 "key": slugify(attr).replace("-", "_"),
                 "type": CustomFieldTypeChoices.TYPE_TEXT,
                 "label": attr,
+                "description": f"Auto-created by the Infoblox SSoT integration to mirror Infoblox Extensibility Attribute '{attr}'.",
+                "grouping": "Infoblox",
             }
             field, _ = OrmCF.objects.get_or_create(key=_cf_dict["key"], defaults=_cf_dict)
             field.content_types.add(ContentType.objects.get_for_model(type(obj)).id)
@@ -181,6 +191,7 @@ class NautobotNetwork(Network):
     """Nautobot implementation of the Network Model."""
 
     @classmethod
+    @transaction.atomic
     def create(cls, adapter, ids, attrs):
         """Create Prefix object in Nautobot."""
         namespace_name = map_network_view_to_namespace(
@@ -201,8 +212,8 @@ class NautobotNetwork(Network):
         # Only attempt associating to VLANs if they were actually loaded
         if attrs.get("vlans") and adapter.vlan_map:
             relation = adapter.relationship_map["Prefix -> VLAN"]
+            index = 0
             for _, _vlan in attrs["vlans"].items():
-                index = 0
                 try:
                     found_vlan = adapter.vlan_map[_vlan["group"]][_vlan["vid"]]
                     if found_vlan:
@@ -250,7 +261,7 @@ class NautobotNetwork(Network):
                     try:
                         vlan = OrmVlan.objects.get(vid=item["vid"], name=item["name"], vlan_group__name=item["group"])
                         if vlan not in current_vlans:
-                            if self.adapter.job.get("debug"):
+                            if self.adapter.job.debug:
                                 self.adapter.job.logger.debug(f"Adding VLAN {vlan.vid} to {_pf.prefix}.")
                             OrmRelationshipAssociation.objects.get_or_create(
                                 relationship_id=self.adapter.relationship_map["Prefix -> VLAN"],
@@ -264,7 +275,7 @@ class NautobotNetwork(Network):
                             self.adapter.job.logger.debug(
                                 f"Unable to find VLAN {item['vid']} {item['name']} in {item['group']} to assign to prefix {_pf.prefix}."
                             )
-                            continue
+                        continue
             else:
                 for vlan in current_vlans:
                     if vlan.vid not in attrs["vlans"]:
@@ -402,8 +413,19 @@ class NautobotVlanGroup(VlanView):
 
     def delete(self):
         """Delete VLANGroup object in Nautobot."""
-        self.adapter.job.logger.warning(f"VLAN Group {self.name} will be deleted.")
+        if NautobotDeletableModelChoices.VLAN_GROUP not in self.adapter.config.nautobot_deletable_models:
+            return super().delete()
+
         _vg = OrmVlanGroup.objects.get(id=self.pk)
+        if _vg.vlans.exists():
+            self.adapter.job.logger.warning(
+                f"VLAN Group {self.name} cannot be deleted because it still contains VLANs."
+            )
+            return super().delete()
+
+        self.adapter.job.logger.warning(f"VLAN Group {self.name} will be deleted.")
+        if self.name in self.adapter.vlangroup_map:
+            del self.adapter.vlangroup_map[self.name]
         _vg.delete()
         return super().delete()
 
@@ -465,8 +487,17 @@ class NautobotVlan(Vlan):
 
     def delete(self):
         """Delete VLAN object in Nautobot."""
+        if NautobotDeletableModelChoices.VLAN not in self.adapter.config.nautobot_deletable_models:
+            return super().delete()
+
         self.adapter.job.logger.warning(f"VLAN {self.vid} will be deleted.")
         _vlan = OrmVlan.objects.get(id=self.pk)
+        if (
+            self.vlangroup
+            and self.vlangroup in self.adapter.vlan_map
+            and self.vid in self.adapter.vlan_map[self.vlangroup]
+        ):
+            del self.adapter.vlan_map[self.vlangroup][self.vid]
         _vlan.delete()
         return super().delete()
 

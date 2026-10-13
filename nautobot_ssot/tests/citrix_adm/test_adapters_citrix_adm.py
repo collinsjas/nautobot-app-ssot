@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock
 
 from diffsync.exceptions import ObjectNotFound
-from nautobot.core.testing import TransactionTestCase
+from nautobot.apps.testing import TestCase
 from nautobot.extras.models import JobResult
 
 from nautobot_ssot.integrations.citrix_adm.diffsync.adapters.citrix_adm import CitrixAdmAdapter
@@ -17,7 +17,7 @@ from nautobot_ssot.tests.citrix_adm.fixtures import (
 )
 
 
-class TestCitrixAdmAdapterTestCase(TransactionTestCase):  # pylint: disable=too-many-instance-attributes
+class TestCitrixAdmAdapterTestCase(TestCase):  # pylint: disable=too-many-instance-attributes
     """Test NautobotSsotCitrixAdmAdapter class."""
 
     databases = ("default", "job_logs")
@@ -32,31 +32,31 @@ class TestCitrixAdmAdapterTestCase(TransactionTestCase):  # pylint: disable=too-
         self.addr = None
         super().__init__(*args, **kwargs)
 
-    def setUp(self):
+    @classmethod
+    def setUpTestData(cls):
         """Configure shared objects for test cases."""
-        super().setUp()
-        self.instance = MagicMock()
-        self.instance.name = "Test"
-        self.instance.remote_url = "https://test.example.com"
-        self.instance.verify_ssl = True
+        super().setUpTestData()
+        cls.instance = MagicMock()
+        cls.instance.name = "Test"
+        cls.instance.remote_url = "https://test.example.com"
+        cls.instance.verify_ssl = True
 
-        self.citrix_adm_client = MagicMock()
-        self.citrix_adm_client.get_sites.return_value = SITE_FIXTURE_RECV
-        self.citrix_adm_client.get_devices.return_value = DEVICE_FIXTURE_RECV
-        self.citrix_adm_client.get_vlan_bindings.side_effect = VLAN_FIXTURE_RECV
-        self.citrix_adm_client.get_nsip6.side_effect = NSIP6_FIXTURE_RECV
-        self.job = CitrixAdmDataSource()
-        self.job.debug = True
-        self.job.location_map = {}
-        self.job.parent_location = None
-        self.job.hostname_mapping = {}
-        self.job.logger.warning = MagicMock()
-        self.job.logger.info = MagicMock()
-        self.job.job_result = JobResult.objects.create(
-            name=self.job.class_path, task_name="fake task", worker="default"
-        )
-        self.citrix_adm = CitrixAdmAdapter(job=self.job, sync=None, instances=[self.instance])
-        self.citrix_adm.conn = self.citrix_adm_client
+        cls.citrix_adm_client = MagicMock()
+        cls.citrix_adm_client.get_sites.return_value = SITE_FIXTURE_RECV
+        cls.citrix_adm_client.get_devices.return_value = DEVICE_FIXTURE_RECV
+        cls.citrix_adm_client.get_vlan_bindings.side_effect = VLAN_FIXTURE_RECV
+        cls.citrix_adm_client.get_nsip6.side_effect = NSIP6_FIXTURE_RECV
+        cls.job = CitrixAdmDataSource()
+        cls.job.debug = True
+        cls.job.location_map = {}
+        cls.job.parent_location = None
+        cls.job.hostname_mapping = {}
+        cls.job.logger.warning = MagicMock()
+        cls.job.logger.info = MagicMock()
+        cls.job.logger.debug = MagicMock()
+        cls.job.job_result = JobResult.objects.create(name=cls.job.class_path, task_name="fake task", worker="default")
+        cls.citrix_adm = CitrixAdmAdapter(job=cls.job, sync=None, instances=[cls.instance])
+        cls.citrix_adm.conn = cls.citrix_adm_client
 
     def test_load_site(self):
         """Test Nautobot SSoT Citrix ADM load_site() function."""
@@ -129,12 +129,13 @@ class TestCitrixAdmAdapterTestCase(TransactionTestCase):  # pylint: disable=too-
         self.citrix_adm.load_addresses()
         self.citrix_adm.load_prefix.assert_called_with(prefix="192.168.1.0/24")
         self.citrix_adm.load_address.assert_called_with(
-            address="192.168.1.5/24",
+            host_addr="192.168.1.5",
+            mask_length=24,
             prefix="192.168.1.0/24",
             tags=["MGMT"],
         )
         self.citrix_adm.load_address_to_interface.assert_called_with(
-            address="192.168.1.5/24", device="TEST", port="0/1", primary=True
+            host_addr="192.168.1.5", device="TEST", port="0/1", primary=True
         )
 
     def test_load_prefix(self):
@@ -144,15 +145,39 @@ class TestCitrixAdmAdapterTestCase(TransactionTestCase):  # pylint: disable=too-
 
     def test_load_address(self):
         """Test the Nautobot SSoT Citrix ADM load_address() function."""
-        self.citrix_adm.load_address(address="10.0.0.1/24", prefix="10.0.0.0/24", tags=["TEST"])
+        self.citrix_adm.load_address(host_addr="10.0.0.1", mask_length=24, prefix="10.0.0.0/24", tags=["TEST"])
         self.assertEqual(
-            {"10.0.0.1/24__10.0.0.0/24"},
+            {"10.0.0.1__None"},
             {addr.get_unique_id() for addr in self.citrix_adm.get_all("address")},
         )
 
     def test_load_address_to_interface(self):
         """Test the Nautobot SSoT Citrix ADM load_address_to_interface() function."""
-        self.citrix_adm.load_address_to_interface(address="10.0.0.1/24", device="TEST", port="mgmt", primary=True)
+        self.citrix_adm.load_address_to_interface(host_addr="10.0.0.1", device="TEST", port="mgmt", primary=True)
         self.assertEqual(
-            {"10.0.0.1/24__TEST__mgmt"}, {map.get_unique_id() for map in self.citrix_adm.get_all("ip_on_intf")}
+            {"10.0.0.1__TEST__mgmt"}, {map.get_unique_id() for map in self.citrix_adm.get_all("ip_on_intf")}
         )
+
+    def test_find_closer_parent_prefix_with_update(self):
+        """Test the Nautobot SSoT Citrix ADM find_closer_parent_prefix() function where the prefix is updated."""
+        self.citrix_adm.load_prefix(prefix="192.168.1.0/24")
+        self.citrix_adm.load_address(host_addr="192.168.1.1", mask_length=32, prefix="192.168.1.0/24")
+        self.citrix_adm.load_prefix(prefix="192.168.1.0/29")
+        self.job.debug = True
+        self.citrix_adm.find_closer_parent_prefix()
+        self.job.logger.debug.assert_called_with(
+            "More specific Prefix %s found for IPAddress %s", "192.168.1.0/29", "192.168.1.1"
+        )
+        loaded_addr = self.citrix_adm.get("address", "192.168.1.1__None")
+        self.assertEqual(loaded_addr.prefix, "192.168.1.0/29")
+
+    def test_find_closer_parent_prefix_with_mismatched_address_and_prefix(self):
+        """Test the Nautobot SSoT Citrix ADM find_closer_parent_prefix() function where the prefix IPv6 and address is IPv4."""
+        self.citrix_adm.load_prefix(prefix="2001:db8::/64")
+        self.citrix_adm.load_prefix(prefix="192.168.2.0/24")
+        self.citrix_adm.load_address(host_addr="192.168.1.1", mask_length=32, prefix="2001:db8::/64")
+        self.citrix_adm.load_prefix(prefix="2001:db8::/48")
+        self.citrix_adm.find_closer_parent_prefix()
+        loaded_addr = self.citrix_adm.get("address", "192.168.1.1__None")
+        self.assertEqual(loaded_addr.prefix, "2001:db8::/64")
+        self.job.logger.debug.assert_not_called()

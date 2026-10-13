@@ -1,12 +1,7 @@
 # pylint: disable=R0801
 """DiffSyncModel subclasses for Nautobot-to-SolarWinds data sync."""
 
-try:
-    from typing import Annotated  # Python>=3.9
-except ImportError:
-    from typing_extensions import Annotated  # Python<3.9
-
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from diffsync.enum import DiffSyncModelFlags
 from nautobot.dcim.models import Device, DeviceType, Interface, Location, Manufacturer, Platform, SoftwareVersion
@@ -14,8 +9,8 @@ from nautobot.extras.models import Role
 from nautobot.ipam.models import IPAddress, IPAddressToInterface, Prefix
 
 from nautobot_ssot.contrib.model import NautobotModel
+from nautobot_ssot.contrib.typeddicts import ContentTypeDict
 from nautobot_ssot.contrib.types import CustomFieldAnnotation
-from nautobot_ssot.tests.contrib_base_classes import ContentTypeDict
 
 
 class LocationModel(NautobotModel):

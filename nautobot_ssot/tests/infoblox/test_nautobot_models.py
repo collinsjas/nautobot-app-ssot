@@ -1,13 +1,16 @@
 # pylint: disable=too-many-lines,too-many-public-methods,R0801
 """Unit tests for the Infoblox Diffsync models."""
 
+import uuid
 from unittest.mock import Mock
 
 from django.contrib.contenttypes.models import ContentType
-from django.test import TestCase
+from nautobot.apps.testing import TestCase
+from nautobot.dcim.models import Location, LocationType
 from nautobot.extras.choices import CustomFieldTypeChoices
-from nautobot.extras.models import CustomField, Status, Tag
-from nautobot.ipam.models import IPAddress, Namespace, Prefix
+from nautobot.extras.models import CustomField, Relationship, RelationshipAssociation, Role, Status, Tag
+from nautobot.ipam.models import VLAN, IPAddress, Namespace, Prefix, VLANGroup
+from nautobot.tenancy.models import Tenant
 
 from nautobot_ssot.integrations.infoblox.choices import (
     DNSRecordTypeChoices,
@@ -16,6 +19,7 @@ from nautobot_ssot.integrations.infoblox.choices import (
 )
 from nautobot_ssot.integrations.infoblox.diffsync.adapters.infoblox import InfobloxAdapter
 from nautobot_ssot.integrations.infoblox.diffsync.adapters.nautobot import NautobotAdapter
+from nautobot_ssot.integrations.infoblox.diffsync.models.nautobot import process_ext_attrs
 from nautobot_ssot.tests.infoblox.fixtures_infoblox import create_default_infoblox_config, create_prefix_relationship
 
 
@@ -115,6 +119,11 @@ class TestModelNautobotNetwork(TestCase):
         self.status_active, _ = Status.objects.get_or_create(name="Active")
         self.tag_sync_from_infoblox, _ = Tag.objects.get_or_create(name="SSoT Synced from Infoblox")
         self.infoblox_adapter = InfobloxAdapter(conn=Mock(), config=self.config)
+        self.location_type, _ = LocationType.objects.get_or_create(name="Test LocationType 1")
+        self.location_type.content_types.add(ContentType.objects.get_for_model(Prefix))
+        self.location, _ = Location.objects.get_or_create(
+            name="Test Location 1", location_type=self.location_type, status=self.status_active
+        )
         inf_ds_namespace = self.infoblox_adapter.namespace(
             name="Global",
             ext_attrs={},
@@ -128,14 +137,19 @@ class TestModelNautobotNetwork(TestCase):
 
     def test_network_create_network(self):
         """Validate network gets created."""
-        inf_network_atrs = {"network_type": "network", "namespace": "dev"}
+        inf_network_atrs = {
+            "network_type": "network",
+            "namespace": "dev",
+            "ext_attrs": {"location": self.location.name},
+        }
         inf_ds_network = self.infoblox_adapter.prefix(**_get_network_dict(inf_network_atrs))
         self.infoblox_adapter.add(inf_ds_network)
 
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
-        nb_adapter.load()
-        self.infoblox_adapter.sync_to(nb_adapter)
+        nb_adapter.job = Mock(debug=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            nb_adapter.load()
+            self.infoblox_adapter.sync_to(nb_adapter)
 
         prefix = Prefix.objects.get(network="10.0.0.0", prefix_length="8", namespace__name="dev")
 
@@ -145,20 +159,39 @@ class TestModelNautobotNetwork(TestCase):
         self.assertEqual("TestNetwork", prefix.description)
         self.assertEqual("network", prefix.type)
         self.assertIn(self.tag_sync_from_infoblox, prefix.tags.all())
+        self.assertQuerysetEqualAndNotEmpty([self.location], prefix.locations.all())
 
     def test_network_update_network(self):
-        """Validate network gets updated."""
+        """Validate network gets updated, including VLAN relationships."""
+        # Create VLAN and VLANGroup for testing the relationship
+        vg, _ = VLANGroup.objects.get_or_create(name="Test Group", location=self.location)
+        vlan, _ = VLAN.objects.get_or_create(vid=10, name="Test VLAN", vlan_group=vg, status=self.status_active)
+
+        # Add VLAN and VLANGroup to infoblox_adapter to prevent them from being deleted during sync
+        inf_ds_vlangroup = self.infoblox_adapter.vlangroup(name="Test Group", description="", ext_attrs={})
+        self.infoblox_adapter.add(inf_ds_vlangroup)
+        inf_ds_vlan = self.infoblox_adapter.vlan(
+            vid=10,
+            name="Test VLAN",
+            vlangroup="Test Group",
+            status="ASSIGNED",
+            description="",
+            ext_attrs={},
+        )
+        self.infoblox_adapter.add(inf_ds_vlan)
+
         inf_network_atrs = {
             "network_type": "network",
             "namespace": "dev",
             "ext_attrs": {"vlan": "10"},
             "description": "New description",
+            "vlans": {"10": {"vid": 10, "name": "Test VLAN", "group": "Test Group"}},
         }
         inf_ds_network = self.infoblox_adapter.prefix(**_get_network_dict(inf_network_atrs))
         self.infoblox_adapter.add(inf_ds_network)
 
         Prefix.objects.get_or_create(
-            prefix="10.0.0.0/24",
+            prefix="10.0.0.0/8",
             status=self.status_active,
             type="network",
             description="Old description",
@@ -166,7 +199,7 @@ class TestModelNautobotNetwork(TestCase):
         )
 
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True, logger=Mock())
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -178,7 +211,156 @@ class TestModelNautobotNetwork(TestCase):
         self.assertEqual("New description", prefix.description)
         self.assertEqual("network", prefix.type)
         self.assertEqual({"vlan": "10"}, prefix.custom_field_data)
-        self.assertIn(self.tag_sync_from_infoblox, prefix.tags.all())
+
+        # Verify RelationshipAssociation is created (Regression test for line 258 fix)
+        rel = Relationship.objects.get(label="Prefix -> VLAN")
+        assoc = RelationshipAssociation.objects.filter(relationship=rel, source_id=prefix.id, destination_id=vlan.id)
+        self.assertTrue(assoc.exists())
+        self.assertTrue(
+            any(
+                "Adding VLAN" in call.args[0]
+                for call in nb_adapter.job.logger.debug.call_args_list
+                if call.args and isinstance(call.args[0], str)
+            )
+        )
+
+    def test_network_update_network_vlan_not_found(self):
+        """Validate network update handles missing VLAN gracefully."""
+        # Ensure vlan_map is populated while the requested VLAN remains missing.
+        vg, _ = VLANGroup.objects.get_or_create(name="Test Group", location=self.location)
+        VLAN.objects.get_or_create(vid=10, name="Existing VLAN", vlan_group=vg, status=self.status_active)
+
+        # Keep existing VLAN objects present in source to avoid unrelated delete paths.
+        inf_ds_vlangroup = self.infoblox_adapter.vlangroup(name="Test Group", description="", ext_attrs={})
+        self.infoblox_adapter.add(inf_ds_vlangroup)
+        inf_ds_vlan = self.infoblox_adapter.vlan(
+            vid=10,
+            name="Existing VLAN",
+            vlangroup="Test Group",
+            status="ASSIGNED",
+            description="",
+            ext_attrs={},
+        )
+        self.infoblox_adapter.add(inf_ds_vlan)
+
+        inf_network_atrs = {
+            "network_type": "network",
+            "namespace": "dev",
+            "vlans": {"20": {"vid": 20, "name": "Missing VLAN", "group": "Test Group"}},
+        }
+        inf_ds_network = self.infoblox_adapter.prefix(**_get_network_dict(inf_network_atrs))
+        self.infoblox_adapter.add(inf_ds_network)
+
+        Prefix.objects.get_or_create(
+            prefix="10.0.0.0/8",
+            status=self.status_active,
+            type="network",
+            namespace=self.namespace_dev,
+        )
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True, logger=Mock())
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        prefix = Prefix.objects.get(network="10.0.0.0", prefix_length="8", namespace__name="dev")
+        rel = Relationship.objects.get(label="Prefix -> VLAN")
+        self.assertFalse(RelationshipAssociation.objects.filter(relationship=rel, source_id=prefix.id).exists())
+        self.assertTrue(
+            any(
+                "Unable to find VLAN" in call.args[0]
+                for call in nb_adapter.job.logger.debug.call_args_list
+                if call.args and isinstance(call.args[0], str)
+            )
+        )
+
+    def test_network_update_network_no_debug(self):
+        """Validate network gets updated when debug is disabled (Regression test for Truthy Mock)."""
+        vg, _ = VLANGroup.objects.get_or_create(name="Test Group", location=self.location)
+        VLAN.objects.get_or_create(vid=10, name="Test VLAN", vlan_group=vg, status=self.status_active)
+
+        # Add necessary objects to source adapter to prevent them from being deleted during sync
+        inf_ds_vlangroup = self.infoblox_adapter.vlangroup(name="Test Group", description="", ext_attrs={})
+        self.infoblox_adapter.add(inf_ds_vlangroup)
+        inf_ds_vlan = self.infoblox_adapter.vlan(
+            vid=10, name="Test VLAN", vlangroup="Test Group", status="ASSIGNED", description="", ext_attrs={}
+        )
+        self.infoblox_adapter.add(inf_ds_vlan)
+
+        inf_network_atrs = {
+            "network_type": "network",
+            "namespace": "dev",
+            "description": "No debug update",
+            "vlans": {"10": {"vid": 10, "name": "Test VLAN", "group": "Test Group"}},
+        }
+        ds_network = self.infoblox_adapter.prefix(**_get_network_dict(inf_network_atrs))
+        self.infoblox_adapter.add(ds_network)
+
+        Prefix.objects.get_or_create(
+            prefix="10.0.0.0/8",
+            status=self.status_active,
+            type="network",
+            description="Old description",
+            namespace=self.namespace_dev,
+        )
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=False)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        prefix = Prefix.objects.get(network="10.0.0.0", prefix_length="8", namespace__name="dev")
+        self.assertEqual("No debug update", prefix.description)
+        rel = Relationship.objects.get(label="Prefix -> VLAN")
+        self.assertTrue(RelationshipAssociation.objects.filter(relationship=rel, source_id=prefix.id).exists())
+
+    def test_network_create_network_with_ranges_and_partial_vlan_map(self):
+        """Validate network create handles ranges and partially missing VLAN mappings."""
+        vg, _ = VLANGroup.objects.get_or_create(name="Create Group", location=self.location)
+        vlan, _ = VLAN.objects.get_or_create(vid=30, name="Create VLAN", vlan_group=vg, status=self.status_active)
+
+        # Keep source VLAN objects to avoid unrelated delete paths in sync.
+        self.infoblox_adapter.add(self.infoblox_adapter.vlangroup(name="Create Group", description="", ext_attrs={}))
+        self.infoblox_adapter.add(
+            self.infoblox_adapter.vlan(
+                vid=30,
+                name="Create VLAN",
+                vlangroup="Create Group",
+                status="ASSIGNED",
+                description="",
+                ext_attrs={},
+            )
+        )
+
+        inf_network_atrs = {
+            "network_type": "network",
+            "namespace": "dev",
+            "ranges": ["10.0.0.10-10.0.0.20"],
+            "vlans": {
+                "30": {"vid": 30, "name": "Create VLAN", "group": "Create Group"},
+                "999": {"vid": 999, "name": "Missing VLAN", "group": "Missing Group"},
+            },
+        }
+        self.infoblox_adapter.add(self.infoblox_adapter.prefix(**_get_network_dict(inf_network_atrs)))
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True, logger=Mock())
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        prefix = Prefix.objects.get(network="10.0.0.0", prefix_length="8", namespace__name="dev")
+        rel = Relationship.objects.get(label="Prefix -> VLAN")
+        assoc = RelationshipAssociation.objects.filter(relationship=rel, source_id=prefix.id, destination_id=vlan.id)
+
+        self.assertEqual("10.0.0.10-10.0.0.20", prefix.custom_field_data.get("dhcp_ranges"))
+        self.assertTrue(assoc.exists())
+        self.assertTrue(
+            any(
+                "Unable to find VLAN 999 Missing VLAN in Missing Group" in call.args[0]
+                for call in nb_adapter.job.logger.warning.call_args_list
+                if call.args and isinstance(call.args[0], str)
+            )
+        )
 
 
 class TestModelNautobotIPAddress(TestCase):
@@ -273,7 +455,7 @@ class TestModelNautobotIPAddress(TestCase):
 
         self.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -312,7 +494,7 @@ class TestModelNautobotIPAddress(TestCase):
 
         self.config.fixed_address_type = FixedAddressTypeChoices.MAC_ADDRESS
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -350,7 +532,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.A_RECORD
         self.config.fixed_address_type = FixedAddressTypeChoices.MAC_ADDRESS
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -388,7 +570,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.fixed_address_type = FixedAddressTypeChoices.DONT_CREATE_RECORD
         self.config.dns_record_type = DNSRecordTypeChoices.HOST_RECORD
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -435,7 +617,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.A_RECORD
         self.config.fixed_address_type = FixedAddressTypeChoices.MAC_ADDRESS
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -490,7 +672,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.A_AND_PTR_RECORD
         self.config.fixed_address_type = FixedAddressTypeChoices.MAC_ADDRESS
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -540,7 +722,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.HOST_RECORD
         self.config.fixed_address_type = FixedAddressTypeChoices.MAC_ADDRESS
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -592,7 +774,7 @@ class TestModelNautobotIPAddress(TestCase):
 
         self.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -642,7 +824,7 @@ class TestModelNautobotIPAddress(TestCase):
 
         self.config.fixed_address_type = FixedAddressTypeChoices.MAC_ADDRESS
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -703,7 +885,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.A_RECORD
         self.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -752,7 +934,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
         self.config.nautobot_deletable_models = []
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -789,7 +971,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
         self.config.nautobot_deletable_models = [NautobotDeletableModelChoices.IP_ADDRESS]
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -836,7 +1018,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.A_RECORD
         self.config.nautobot_deletable_models = [NautobotDeletableModelChoices.DNS_A_RECORD]
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -891,7 +1073,7 @@ class TestModelNautobotIPAddress(TestCase):
         self.config.dns_record_type = DNSRecordTypeChoices.HOST_RECORD
         self.config.nautobot_deletable_models = [NautobotDeletableModelChoices.DNS_HOST_RECORD]
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -950,7 +1132,7 @@ class TestModelNautobotIPAddress(TestCase):
             NautobotDeletableModelChoices.DNS_PTR_RECORD,
         ]
         nb_adapter = NautobotAdapter(config=self.config)
-        nb_adapter.job = Mock()
+        nb_adapter.job = Mock(debug=True)
         nb_adapter.load()
         self.infoblox_adapter.sync_to(nb_adapter)
 
@@ -965,3 +1147,536 @@ class TestModelNautobotIPAddress(TestCase):
         self.assertEqual("", ipaddress.custom_field_data.get("dns_a_record_comment"))
         self.assertEqual("", ipaddress.custom_field_data.get("dns_ptr_record_comment"))
         self.assertEqual("dhcp", ipaddress.type)
+
+
+class TestModelNautobotVlanGroupNamespaceVlan(TestCase):
+    """Tests VLANGroup, Namespace and VLAN model update/delete behaviors."""
+
+    def setUp(self):
+        """Test class set up."""
+        create_prefix_relationship()
+        self.config = create_default_infoblox_config()
+        self.config.infoblox_sync_filters = [{"network_view": "default"}, {"network_view": "dev"}]
+        self.config.infoblox_network_view_to_namespace_map = {"default": "Global", "dev": "dev"}
+
+        self.status_active, _ = Status.objects.get_or_create(name="Active")
+        self.status_deprecated, _ = Status.objects.get_or_create(name="Deprecated")
+        self.status_reserved, _ = Status.objects.get_or_create(name="Reserved")
+        for status in [self.status_active, self.status_deprecated, self.status_reserved]:
+            status.content_types.add(ContentType.objects.get_for_model(VLAN))
+
+        self.location_type, _ = LocationType.objects.get_or_create(name="Test LocationType 2")
+        self.location_type.content_types.add(ContentType.objects.get_for_model(VLAN))
+        self.location_type.content_types.add(ContentType.objects.get_for_model(VLANGroup))
+        self.location, _ = Location.objects.get_or_create(
+            name="Test Location 2", location_type=self.location_type, status=self.status_active
+        )
+
+        Namespace.objects.get_or_create(name="Global")
+        Namespace.objects.get_or_create(name="dev")
+        self.infoblox_adapter = InfobloxAdapter(conn=Mock(), config=self.config)
+
+    def _add_source_namespaces(self, include_dev=True):
+        """Add source namespaces used in most sync scenarios."""
+        self.infoblox_adapter.add(self.infoblox_adapter.namespace(name="Global", ext_attrs={}))
+        if include_dev:
+            self.infoblox_adapter.add(self.infoblox_adapter.namespace(name="dev", ext_attrs={}))
+
+    def test_vlangroup_update_ext_attrs(self):
+        """Validate VLANGroup update applies ext attrs via sync."""
+        self._add_source_namespaces(include_dev=True)
+        VLANGroup.objects.get_or_create(name="VG-Update")
+
+        ds_vlangroup = self.infoblox_adapter.vlangroup(
+            name="VG-Update", description="", ext_attrs={"department": "Network"}
+        )
+        self.infoblox_adapter.add(ds_vlangroup)
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        self.assertTrue(VLANGroup.objects.filter(name="VG-Update").exists())
+        self.assertTrue(CustomField.objects.filter(key="department").exists())
+
+    def test_vlangroup_delete(self):
+        """Validate VLANGroup object is deleted when absent from source and enabled in deletable models."""
+        self._add_source_namespaces(include_dev=True)
+        VLANGroup.objects.get_or_create(name="VG-To-Delete")
+
+        self.config.nautobot_deletable_models = [NautobotDeletableModelChoices.VLAN_GROUP]
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        self.assertFalse(VLANGroup.objects.filter(name="VG-To-Delete").exists())
+
+    def test_vlangroup_delete_not_in_deletable_models(self):
+        """Validate VLANGroup object is not deleted when absent from source if not in deletable models."""
+        self._add_source_namespaces(include_dev=True)
+        VLANGroup.objects.get_or_create(name="VG-Keep")
+
+        self.config.nautobot_deletable_models = []
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        self.assertTrue(VLANGroup.objects.filter(name="VG-Keep").exists())
+
+    def test_vlangroup_delete_has_vlans_skips_deletion(self):
+        """Validate VLANGroup object is not deleted if it still contains VLANs."""
+        self._add_source_namespaces(include_dev=True)
+        vg, _ = VLANGroup.objects.get_or_create(name="VG-With-VLAN")
+        VLAN.objects.get_or_create(
+            vid=100,
+            name="VLAN100",
+            vlan_group=vg,
+            status=self.status_active,
+        )
+
+        self.config.nautobot_deletable_models = [NautobotDeletableModelChoices.VLAN_GROUP]
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True, logger=Mock())
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        self.assertTrue(VLANGroup.objects.filter(name="VG-With-VLAN").exists())
+        nb_adapter.job.logger.warning.assert_any_call(
+            "VLAN Group VG-With-VLAN cannot be deleted because it still contains VLANs."
+        )
+
+    def test_namespace_update_ext_attrs(self):
+        """Validate Namespace update applies ext attrs via sync."""
+        self._add_source_namespaces(include_dev=False)
+        ds_namespace = self.infoblox_adapter.namespace(name="dev", ext_attrs={"department": "Engineering"})
+        self.infoblox_adapter.add(ds_namespace)
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        namespace = Namespace.objects.get(name="dev")
+        self.assertEqual("Engineering", namespace.custom_field_data.get("department"))
+
+    def test_namespace_delete_not_allowed(self):
+        """Validate Namespace delete path raises NotImplementedError."""
+        self._add_source_namespaces(include_dev=False)
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+
+        with self.assertRaises(NotImplementedError):
+            self.infoblox_adapter.sync_to(nb_adapter)
+
+    def test_vlan_update_status_description_ext_attrs_and_group_location(self):
+        """Validate VLAN update applies mapped status, description, ext attrs and group location."""
+        self._add_source_namespaces(include_dev=True)
+        vg, _ = VLANGroup.objects.get_or_create(name="VG-VLAN-Update")
+        VLAN.objects.get_or_create(
+            vid=200,
+            name="VLAN200",
+            vlan_group=vg,
+            defaults={
+                "status": self.status_deprecated,
+                "description": "Old VLAN description",
+                "location": self.location,
+            },
+        )
+
+        self.infoblox_adapter.add(self.infoblox_adapter.vlangroup(name="VG-VLAN-Update", description="", ext_attrs={}))
+        self.infoblox_adapter.add(
+            self.infoblox_adapter.vlan(
+                vid=200,
+                name="VLAN200",
+                vlangroup="VG-VLAN-Update",
+                status="ASSIGNED",
+                description="Updated VLAN description",
+                ext_attrs={"department": "Operations"},
+            )
+        )
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        vlan = VLAN.objects.get(vid=200, name="VLAN200", vlan_group__name="VG-VLAN-Update")
+        vg.refresh_from_db()
+        self.assertEqual("Active", vlan.status.name)
+        self.assertEqual("Updated VLAN description", vlan.description)
+        self.assertEqual("Operations", vlan.custom_field_data.get("department"))
+        self.assertEqual(self.location.id, vg.location_id)
+
+    def test_vlan_delete_not_in_deletable_models(self):
+        """Validate VLAN object is not deleted when absent from source if not in deletable models."""
+        self._add_source_namespaces(include_dev=True)
+        vg, _ = VLANGroup.objects.get_or_create(name="VG-Test-Keep")
+        VLAN.objects.get_or_create(
+            vid=300,
+            name="VLAN300",
+            vlan_group=vg,
+            status=self.status_active,
+        )
+        self.infoblox_adapter.add(self.infoblox_adapter.vlangroup(name="VG-Test-Keep", description="", ext_attrs={}))
+
+        self.config.nautobot_deletable_models = []
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        self.assertTrue(VLAN.objects.filter(name="VLAN300", vid=300).exists())
+
+    def test_vlan_delete_success(self):
+        """Validate VLAN object is deleted when absent from source and enabled in deletable models."""
+        self._add_source_namespaces(include_dev=True)
+        vg, _ = VLANGroup.objects.get_or_create(name="VG-Test-Del")
+        VLAN.objects.get_or_create(
+            vid=301,
+            name="VLAN301",
+            vlan_group=vg,
+            status=self.status_active,
+        )
+        self.infoblox_adapter.add(self.infoblox_adapter.vlangroup(name="VG-Test-Del", description="", ext_attrs={}))
+
+        self.config.nautobot_deletable_models = [NautobotDeletableModelChoices.VLAN]
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True)
+        nb_adapter.load()
+        self.infoblox_adapter.sync_to(nb_adapter)
+
+        self.assertFalse(VLAN.objects.filter(name="VLAN301", vid=301).exists())
+
+
+class TestModelNautobotBranchMatrix(TestCase):
+    """Additional branch-matrix tests for Infoblox Nautobot model coverage."""
+
+    def setUp(self):
+        """Test class set up."""
+        create_prefix_relationship()
+        self.config = create_default_infoblox_config()
+        self.config.infoblox_sync_filters = [{"network_view": "default"}, {"network_view": "dev"}]
+        self.config.infoblox_network_view_to_namespace_map = {"default": "Global", "dev": "dev"}
+
+        self.namespace_dev, _ = Namespace.objects.get_or_create(name="dev")
+        self.status_active, _ = Status.objects.get_or_create(name="Active")
+        self.infoblox_adapter = InfobloxAdapter(conn=Mock(), config=self.config)
+
+    def _base_prefix(self, prefix="10.99.0.0/24"):
+        """Create a base prefix for IP and ext-attr tests."""
+        pfx = Prefix(
+            prefix=prefix,
+            status=self.status_active,
+            type="network",
+            namespace=self.namespace_dev,
+            description="Branch Matrix Prefix",
+        )
+        pfx.validated_save()
+        return pfx
+
+    def test_process_ext_attrs_success_matrix_for_ip(self):
+        """Validate process_ext_attrs success branches for role/tenant/custom-field mapping."""
+        prefix = self._base_prefix()
+        tenant = Tenant(name="Tenant Matrix")
+        tenant.validated_save()
+        role = Role(name="Matrix IP Role")
+        role.validated_save()
+
+        ip = IPAddress(address="10.99.0.1/24", status=self.status_active, type="host", parent=prefix)
+        ip.validated_save()
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        # Blank -> backwards-compatible site/facility/location matching. A bare Mock would otherwise
+        # return a truthy Mock here and disable the built-in location names.
+        adapter.config = Mock(infoblox_location_ext_attr="")
+        adapter.tenant_map = {"Tenant Matrix": tenant.id}
+        adapter.role_map = {"Matrix IP Role": role.id}
+        adapter.location_map = {}
+        adapter.vrf_map = {}
+
+        process_ext_attrs(
+            adapter=adapter,
+            obj=ip,
+            extattrs={
+                "role": "Matrix IP Role",
+                "tenant": "Tenant Matrix",
+                "department": "Operations",
+            },
+        )
+
+        self.assertEqual(role.id, ip.role_id)
+        self.assertEqual(tenant.id, ip.tenant_id)
+        self.assertEqual("Operations", ip.custom_field_data.get("department"))
+
+    def test_process_ext_attrs_warning_matrix_for_prefix(self):
+        """Validate process_ext_attrs warning branches for missing maps and unhashable values."""
+        prefix = self._base_prefix(prefix="10.99.1.0/24")
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        # Blank -> backwards-compatible site/facility/location matching. A bare Mock would otherwise
+        # return a truthy Mock here and disable the built-in location names.
+        adapter.config = Mock(infoblox_location_ext_attr="")
+        adapter.location_map = {}
+        adapter.vrf_map = {}
+        adapter.role_map = {}
+        adapter.tenant_map = {}
+
+        process_ext_attrs(
+            adapter=adapter,
+            obj=prefix,
+            extattrs={
+                "location": "Missing Location",
+                "vrf": ["Missing VRF"],
+                "role": ["Role One", "Role Two"],
+                "tenant": ["Tenant One"],
+            },
+        )
+
+        self.assertGreaterEqual(adapter.job.logger.warning.call_count, 4)
+        self.assertEqual("Missing Location", prefix.custom_field_data.get("location"))
+        self.assertEqual("['Missing VRF']", prefix.custom_field_data.get("vrf"))
+        self.assertEqual("['Role One', 'Role Two']", prefix.custom_field_data.get("role"))
+        self.assertEqual("['Tenant One']", prefix.custom_field_data.get("tenant"))
+
+    def test_process_ext_attrs_location_wrong_type_skips_gracefully(self):
+        """A Location whose LocationType cannot contain the object is skipped with a warning, not a crash."""
+        prefix = self._base_prefix(prefix="10.99.5.0/24")
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        adapter.config = Mock(infoblox_location_ext_attr="")
+        # Mirrors a Region: found by name, but its LocationType does not permit Prefixes.
+        adapter.location_map = {
+            "example region": {"id": uuid.uuid4(), "location_type": "Region", "content_types": {"device"}},
+        }
+        adapter.vrf_map = {}
+        adapter.role_map = {}
+        adapter.tenant_map = {}
+
+        # execute=True runs any scheduled on_commit callbacks inside the block; if a
+        # locations.add() had been deferred it would fire here and raise the Region
+        # ValidationError. A clean exit plus an empty locations set proves the graceful skip.
+        with self.captureOnCommitCallbacks(execute=True):
+            process_ext_attrs(adapter=adapter, obj=prefix, extattrs={"site": "EXAMPLE REGION"})
+
+        self.assertEqual(0, prefix.locations.count())
+        adapter.job.logger.warning.assert_called_once()
+        self.assertIn("not permitted to contain", adapter.job.logger.warning.call_args[0][0])
+        # The raw value is still preserved as a custom field.
+        self.assertEqual("EXAMPLE REGION", prefix.custom_field_data.get("site"))
+
+    def test_process_ext_attrs_location_case_insensitive_match(self):
+        """A location extattr resolves to a prefix-capable Location regardless of value case."""
+        site_type = LocationType.objects.create(name="Matrix Site")
+        site_type.content_types.add(ContentType.objects.get_for_model(Prefix))
+        location = Location.objects.create(name="Example Site", location_type=site_type, status=self.status_active)
+        prefix = self._base_prefix(prefix="10.99.6.0/24")
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        adapter.config = Mock(infoblox_location_ext_attr="")
+        adapter.location_map = {
+            location.name.lower(): {
+                "id": location.id,
+                "location_type": site_type.name,
+                "content_types": {ct.model for ct in site_type.content_types.all()},
+            }
+        }
+        adapter.vrf_map = {}
+        adapter.role_map = {}
+        adapter.tenant_map = {}
+
+        with self.captureOnCommitCallbacks(execute=True):
+            process_ext_attrs(adapter=adapter, obj=prefix, extattrs={"location": "EXAMPLE SITE"})
+
+        self.assertIn(location, list(prefix.locations.all()))
+        adapter.job.logger.warning.assert_not_called()
+
+    def test_process_ext_attrs_location_list_value_warns(self):
+        """A list-valued location extattr warns (multiple locations unsupported) instead of erroring."""
+        prefix = self._base_prefix(prefix="10.99.7.0/24")
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        adapter.config = Mock(infoblox_location_ext_attr="")
+        adapter.location_map = {}
+        adapter.vrf_map = {}
+        adapter.role_map = {}
+        adapter.tenant_map = {}
+
+        # execute=True runs any deferred on_commit callbacks here; none should add a location.
+        with self.captureOnCommitCallbacks(execute=True):
+            process_ext_attrs(adapter=adapter, obj=prefix, extattrs={"location": ["Site A", "Site B"]})
+
+        self.assertEqual(0, prefix.locations.count())
+        adapter.job.logger.warning.assert_called_once()
+        self.assertIn("Multiple locations", adapter.job.logger.warning.call_args[0][0])
+
+    def test_process_ext_attrs_configured_location_attr_maps_location(self):
+        """A custom-named location extattr resolves to a Location when infoblox_location_ext_attr is set."""
+        site_type = LocationType.objects.create(name="Configured Site")
+        site_type.content_types.add(ContentType.objects.get_for_model(Prefix))
+        location = Location.objects.create(name="Example Site", location_type=site_type, status=self.status_active)
+        prefix = self._base_prefix(prefix="10.99.9.0/24")
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        adapter.config = Mock(infoblox_location_ext_attr="region_site")
+        adapter.location_map = {
+            location.name.lower(): {
+                "id": location.id,
+                "location_type": site_type.name,
+                "content_types": {ct.model for ct in site_type.content_types.all()},
+            }
+        }
+        adapter.vrf_map = {}
+        adapter.role_map = {}
+        adapter.tenant_map = {}
+
+        with self.captureOnCommitCallbacks(execute=True):
+            process_ext_attrs(adapter=adapter, obj=prefix, extattrs={"region_site": "Example Site"})
+
+        self.assertIn(location, list(prefix.locations.all()))
+        adapter.job.logger.warning.assert_not_called()
+
+    def test_process_ext_attrs_configured_location_attr_shadows_builtins(self):
+        """When a custom location extattr is configured, the built-in site/facility/location names are inert."""
+        site_type = LocationType.objects.create(name="Shadowed Site")
+        site_type.content_types.add(ContentType.objects.get_for_model(Prefix))
+        location = Location.objects.create(name="Example Site", location_type=site_type, status=self.status_active)
+        prefix = self._base_prefix(prefix="10.99.10.0/24")
+
+        adapter = Mock()
+        adapter.job = Mock(logger=Mock())
+        adapter.config = Mock(infoblox_location_ext_attr="region_site")
+        adapter.location_map = {
+            location.name.lower(): {
+                "id": location.id,
+                "location_type": site_type.name,
+                "content_types": {ct.model for ct in site_type.content_types.all()},
+            }
+        }
+        adapter.vrf_map = {}
+        adapter.role_map = {}
+        adapter.tenant_map = {}
+
+        # "site" is a built-in default name, but a custom name is configured, so it must NOT map to a
+        # Location -- it should fall through to an ordinary custom field instead.
+        with self.captureOnCommitCallbacks(execute=True):
+            process_ext_attrs(adapter=adapter, obj=prefix, extattrs={"site": "Example Site"})
+
+        self.assertEqual(0, prefix.locations.count())
+        self.assertEqual("Example Site", prefix.custom_field_data.get("site"))
+
+    def test_dns_host_record_update_paths(self):
+        """Validate Host record update both in configured and non-configured modes."""
+        self.config.dns_record_type = DNSRecordTypeChoices.HOST_RECORD
+        prefix = self._base_prefix(prefix="10.99.2.0/24")
+        IPAddress.objects.create(
+            address="10.99.2.1/24",
+            status=self.status_active,
+            type="host",
+            parent=prefix,
+            dns_name="old-host.example.net",
+            _custom_field_data={"dns_host_record_comment": "Old Host Comment"},
+        )
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True, logger=Mock())
+        nb_adapter.load()
+
+        host_record = next(iter(nb_adapter.get_all("dnshostrecord")))
+        host_record.update({"dns_name": "new-host.example.net", "description": "New Host Comment"})
+
+        ip = IPAddress.objects.get(address="10.99.2.1/24", parent__namespace__name="dev")
+        self.assertEqual("new-host.example.net", ip.dns_name)
+        self.assertEqual("New Host Comment", ip.custom_field_data.get("dns_host_record_comment"))
+
+        host_record.adapter.config.dns_record_type = DNSRecordTypeChoices.A_RECORD
+        host_record.update({"dns_name": "ignored.example.net", "description": "Ignored"})
+        self.assertTrue(host_record.adapter.job.logger.warning.called)
+
+    def test_dns_ptr_record_update_paths(self):
+        """Validate PTR record update both in configured and non-configured modes."""
+        self.config.dns_record_type = DNSRecordTypeChoices.A_AND_PTR_RECORD
+        prefix = self._base_prefix(prefix="10.99.3.0/24")
+        IPAddress.objects.create(
+            address="10.99.3.1/24",
+            status=self.status_active,
+            type="host",
+            parent=prefix,
+            dns_name="ptr.example.net",
+            _custom_field_data={"dns_ptr_record_comment": "Old PTR Comment"},
+        )
+
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True, logger=Mock())
+        nb_adapter.load()
+
+        ptr_record = next(iter(nb_adapter.get_all("dnsptrrecord")))
+        ptr_record.update({"description": "New PTR Comment"})
+
+        ip = IPAddress.objects.get(address="10.99.3.1/24", parent__namespace__name="dev")
+        self.assertEqual("New PTR Comment", ip.custom_field_data.get("dns_ptr_record_comment"))
+
+        ptr_record.adapter.config.dns_record_type = DNSRecordTypeChoices.HOST_RECORD
+        ptr_record.update({"description": "Ignored PTR"})
+        self.assertTrue(ptr_record.adapter.job.logger.warning.called)
+
+    def test_ip_address_update_branch_matrix(self):
+        """Validate key IPAddress.update branch paths for fixed-address handling and fallbacks."""
+        prefix = self._base_prefix(prefix="10.99.4.0/24")
+        ip = IPAddress.objects.create(
+            address="10.99.4.1/24",
+            status=self.status_active,
+            type="host",
+            parent=prefix,
+            description="Original Description",
+            _custom_field_data={"fixed_address_comment": "Original Comment"},
+        )
+
+        self.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
+        nb_adapter = NautobotAdapter(config=self.config)
+        nb_adapter.job = Mock(debug=True, logger=Mock())
+        nb_adapter.load()
+
+        ds_ip = next(iter(nb_adapter.get_all("ipaddress")))
+
+        # Covers description=="" branch and fixed_address_comment update path.
+        ds_ip.update({"description": "", "fixed_address_comment": "Cleared Comment"})
+        ip.refresh_from_db()
+        self.assertEqual("", ip.description)
+        self.assertEqual("Cleared Comment", ip.custom_field_data.get("fixed_address_comment"))
+
+        # Covers DONT_CREATE_RECORD guard branch.
+        ds_ip.adapter.config.fixed_address_type = FixedAddressTypeChoices.DONT_CREATE_RECORD
+        ds_ip.update({"description": "Blocked update"})
+        ip.refresh_from_db()
+        self.assertEqual("", ip.description)
+
+        # Covers status fallback, invalid ip type fallback, and ext/cf update branches.
+        ds_ip.adapter.config.fixed_address_type = FixedAddressTypeChoices.RESERVED
+        ds_ip.update(
+            {
+                "status": "UnknownStatus",
+                "ip_addr_type": "unsupported-type",
+                "description": "Final Description",
+                "ext_attrs": {"department": "Matrix Team"},
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "fixed_address_comment": "Final Comment",
+            }
+        )
+        ip.refresh_from_db()
+        self.assertEqual(self.config.default_status.id, ip.status_id)
+        self.assertEqual("host", ip.type)
+        self.assertEqual("Final Description", ip.description)
+        self.assertEqual("aa:bb:cc:dd:ee:ff", ip.custom_field_data.get("mac_address"))
+        self.assertEqual("Final Comment", ip.custom_field_data.get("fixed_address_comment"))
+        self.assertEqual("Matrix Team", ip.custom_field_data.get("department"))

@@ -2,13 +2,14 @@
 
 from typing import Optional
 
-from diffsync import DiffSync
+from diffsync import Adapter
 from diffsync.enum import DiffSyncModelFlags
 from diffsync.exceptions import ObjectNotFound
 from nautobot.dcim.models import Device as OrmDevice
 from nautobot.dcim.models import Location as OrmLocation
 from nautobot.tenancy.models import Tenant
 
+from nautobot_ssot.integrations.librenms.constants import PLUGIN_CFG
 from nautobot_ssot.integrations.librenms.diffsync.models.nautobot import (
     NautobotDevice,
     NautobotLocation,
@@ -16,11 +17,14 @@ from nautobot_ssot.integrations.librenms.diffsync.models.nautobot import (
 from nautobot_ssot.integrations.librenms.utils import (
     check_sor_field,
     get_sor_field_nautobot_object,
-    normalize_device_hostname,
+)
+from nautobot_ssot.integrations.librenms.utils.nautobot import (
+    clear_network_driver_caches,
+    platform_to_network_driver,
 )
 
 
-class NautobotAdapter(DiffSync):
+class NautobotAdapter(Adapter):
     """DiffSync adapter for Nautobot."""
 
     location = NautobotLocation
@@ -39,6 +43,8 @@ class NautobotAdapter(DiffSync):
         self.tenant = tenant
         self.job = job
         self.sync = sync
+        # Read once per sync so both adapters and ensure_platform agree within a run.
+        self.consolidated_platforms = bool(PLUGIN_CFG.get("librenms_consolidated_platforms", False))
 
     def load_location(self):
         """Load Location objects from Nautobot into DiffSync Models."""
@@ -47,7 +53,8 @@ class NautobotAdapter(DiffSync):
         else:
             locations = OrmLocation.objects.all()
         for nb_location in locations:
-            self.job.logger.debug(f"Loading Nautobot Location {nb_location}")
+            if self.job.debug:
+                self.job.logger.debug(f"Nautobot Adapter Loading Nautobot Location {nb_location}")
             try:
                 self.get(self.location, nb_location.name)
             except ObjectNotFound:
@@ -76,7 +83,19 @@ class NautobotAdapter(DiffSync):
         else:
             devices = OrmDevice.objects.all()
         for nb_device in devices:
-            self.job.logger.debug(f"Loading Nautobot Device {nb_device}")
+            if nb_device.platform is None:
+                self.job.logger.warning(
+                    f"Skipping device {nb_device.name}: no Platform assigned, cannot be synced with LibreNMS."
+                )
+                continue
+            if self.job.debug:
+                self.job.logger.debug(f"Nautobot Adapter Loading Nautobot Device {nb_device}")
+                self.job.logger.debug(
+                    f"Nautobot Adapter Platform for {nb_device.name}: {nb_device.platform.network_driver}"
+                )
+                self.job.logger.debug(
+                    f"Nautobot Adapter Manufacturer for {nb_device.name}: {nb_device.device_type.manufacturer.name}"
+                )
             try:
                 self.get(self.device, nb_device.name)
             except ObjectNotFound:
@@ -85,24 +104,38 @@ class NautobotAdapter(DiffSync):
                 except AttributeError:
                     _software_version = None
                 try:
-                    _ip_address = nb_device.primary_ip.host
+                    _ip_address = str(nb_device.primary_ip4.address)
+                    _ip_prefix = str(nb_device.primary_ip4.parent.prefix)
                 except AttributeError:
                     _ip_address = None
+                    _ip_prefix = None
                 _device_id = None
                 if nb_device.custom_field_data.get("librenms_device_id"):
                     _device_id = nb_device.custom_field_data.get("librenms_device_id")
+                if nb_device.custom_field_data.get("snmp_location"):
+                    _snmp_location = nb_device.custom_field_data.get("snmp_location")
+                else:
+                    _snmp_location = None
                 new_device = NautobotDevice(
-                    name=normalize_device_hostname(nb_device.name),
+                    name=nb_device.name,
+                    tenant=nb_device.tenant.name if nb_device.tenant else None,
                     device_id=_device_id,
                     location=nb_device.location.name,
+                    parent_location=nb_device.location.parent.name if nb_device.location.parent else None,
                     status=nb_device.status.name,
                     device_type=nb_device.device_type.model,
                     role=nb_device.role.name,
                     manufacturer=nb_device.device_type.manufacturer.name,
-                    platform=nb_device.platform.name,
+                    platform=(
+                        platform_to_network_driver(nb_device.platform)
+                        if self.consolidated_platforms
+                        else nb_device.platform.name
+                    ),
                     os_version=_software_version,
                     serial_no=nb_device.serial,
                     ip_address=_ip_address,
+                    ip_prefix=_ip_prefix,
+                    snmp_location=_snmp_location,
                     system_of_record=get_sor_field_nautobot_object(nb_device),
                     uuid=nb_device.id,
                 )
@@ -113,6 +146,8 @@ class NautobotAdapter(DiffSync):
 
     def load(self):
         """Load data from Nautobot into DiffSync models."""
+        # Keep driver resolution consistent with the LibreNMS side.
+        clear_network_driver_caches()
         if self.job.sync_locations:
             if self.job.debug:
                 self.job.logger.debug("Loading Nautobot Locations")

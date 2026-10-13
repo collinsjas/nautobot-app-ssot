@@ -51,13 +51,13 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
     default_status = models.ForeignKey(
         to="extras.Status",
         on_delete=models.PROTECT,
-        verbose_name="Default Object Status",
-        help_text="Default Object Status",
+        verbose_name="Default Status for Imported Objects",
+        help_text="Default Status for Imported Objects",
     )
     infoblox_instance = models.ForeignKey(
         to="extras.ExternalIntegration",
         on_delete=models.PROTECT,
-        verbose_name="Infoblox Instance Config",
+        verbose_name="Infoblox Instance",
         help_text="Infoblox Instance",
     )
     infoblox_wapi_version = models.CharField(
@@ -66,10 +66,14 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
         verbose_name="Infoblox WAPI version",
     )
     enable_sync_to_infoblox = models.BooleanField(
-        default=False, verbose_name="Sync to Infoblox", help_text="Enable syncing of data from Nautobot to Infoblox."
+        default=False,
+        verbose_name="Enable Sync from Nautobot to Infoblox",
+        help_text="Enable syncing of data from Nautobot to Infoblox.",
     )
     enable_sync_to_nautobot = models.BooleanField(
-        default=True, verbose_name="Sync to Nautobot", help_text="Enable syncing of data from Infoblox to Nautobot."
+        default=True,
+        verbose_name="Enable Sync from Infoblox to Nautobot",
+        help_text="Enable syncing of data from Infoblox to Nautobot.",
     )
     import_ip_addresses = models.BooleanField(
         default=False,
@@ -92,6 +96,16 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
         default=_get_network_view_to_namespace_map, encoder=DjangoJSONEncoder
     )
     infoblox_dns_view_mapping = models.JSONField(default=dict, encoder=DjangoJSONEncoder, blank=True)
+    infoblox_location_ext_attr = models.CharField(
+        max_length=CHARFIELD_MAX_LENGTH,
+        blank=True,
+        default="",
+        verbose_name="Infoblox Location Extensibility Attribute",
+        help_text=(
+            "Name of the Infoblox Extensibility Attribute whose value maps to a Nautobot Location. "
+            "Leave blank to use the built-in names: site, facility, location."
+        ),
+    )
     cf_fields_ignore = models.JSONField(default=_get_default_cf_fields_ignore, encoder=DjangoJSONEncoder, blank=True)
     import_ipv4 = models.BooleanField(
         default=True,
@@ -105,7 +119,7 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
         max_length=CHARFIELD_MAX_LENGTH,
         default=DNSRecordTypeChoices.HOST_RECORD,
         choices=DNSRecordTypeChoices,
-        verbose_name="DBS record type",
+        verbose_name="Infoblox - DNS record type",
         help_text="Choose what type of Infoblox DNS record to create for IP Addresses.",
     )
     fixed_address_type = models.CharField(
@@ -116,18 +130,28 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
     )
     job_enabled = models.BooleanField(
         default=False,
-        verbose_name="Enabled for Sync Job",
+        verbose_name="Can be used in Sync Job",
         help_text="Enable use of this configuration in the sync jobs.",
     )
     infoblox_deletable_models = models.JSONField(
         encoder=DjangoJSONEncoder,
         default=list,
         blank=True,
+        verbose_name="Infoblox - deletable models",
         help_text="Model types that can be deleted in Infoblox.",
     )
     nautobot_deletable_models = models.JSONField(
-        encoder=DjangoJSONEncoder, default=list, blank=True, help_text="Model types that can be deleted in Nautobot."
+        encoder=DjangoJSONEncoder,
+        default=list,
+        blank=True,
+        help_text="Model types that can be deleted in Nautobot.",
+        verbose_name="Nautobot - deletable models",
     )
+    is_saved_view_model = False
+    is_dynamic_group_associable_model = False
+    is_metadata_associable_model = False
+    is_contact_associable_model = False
+    is_data_compliance_model = False
 
     class Meta:
         """Meta class for SSOTInfobloxConfig."""
@@ -263,6 +287,32 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
                 }
             )
 
+    def _clean_infoblox_location_ext_attr(self):
+        """Performs validation of the infoblox_location_ext_attr field.
+
+        The configured name must not collide with an Extensibility Attribute name that
+        'process_ext_attrs' already routes to a different Nautobot field, otherwise the same
+        attribute would be applied as both a Location and (e.g.) a Tenant during sync.
+        """
+        location_ext_attr = (self.infoblox_location_ext_attr or "").lower()
+        if not location_ext_attr:
+            return
+        if "role" in location_ext_attr:
+            raise ValidationError(
+                {
+                    "infoblox_location_ext_attr": "`infoblox_location_ext_attr` cannot contain `role`, which is "
+                    "already used to map to a Nautobot Role.",
+                },
+            )
+        reserved = {"vrf": "VRF", "tenant": "Tenant", "dept": "Tenant", "department": "Tenant"}
+        if location_ext_attr in reserved:
+            raise ValidationError(
+                {
+                    "infoblox_location_ext_attr": f"`infoblox_location_ext_attr` cannot be `{location_ext_attr}`, "
+                    f"which is already used to map to a Nautobot {reserved[location_ext_attr]}.",
+                },
+            )
+
     def _clean_infoblox_dns_view_mapping(self):
         """Performs validation of the infoblox_dns_view_mapping field."""
         if not isinstance(self.infoblox_dns_view_mapping, dict):
@@ -324,5 +374,6 @@ class SSOTInfobloxConfig(PrimaryModel):  # pylint: disable=too-many-ancestors
         self._clean_infoblox_instance()
         self._clean_import_ip()
         self._clean_infoblox_dns_view_mapping()
+        self._clean_infoblox_location_ext_attr()
         self._clean_cf_fields_ignore()
         self._clean_deletable_model_types()

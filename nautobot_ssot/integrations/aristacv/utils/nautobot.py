@@ -9,11 +9,10 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from nautobot.core.models.utils import slugify
 from nautobot.core.settings_funcs import is_truthy
-from nautobot.dcim.models import Device, DeviceType, Location, LocationType, Manufacturer
+from nautobot.dcim.models import Device, DeviceType, Location, LocationType, Manufacturer, SoftwareVersion
 from nautobot.extras.choices import SecretsGroupAccessTypeChoices, SecretsGroupSecretTypeChoices
 from nautobot.extras.models import (
     ExternalIntegration,
-    Relationship,
     Role,
     Secret,
     SecretsGroup,
@@ -24,7 +23,6 @@ from nautobot.extras.models import (
 
 from nautobot_ssot.integrations.aristacv import constants
 from nautobot_ssot.integrations.aristacv.types import CloudVisionAppConfig
-from nautobot_ssot.utils import dlm_supports_softwarelcm
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +96,15 @@ def get_config() -> CloudVisionAppConfig:
         "is_on_premise": bool(app_settings.get("aristacv_cvp_host")),
         "delete_devices_on_sync": is_truthy(
             app_settings.get("aristacv_delete_devices_on_sync", constants.DEFAULT_DELETE_DEVICES_ON_SYNC)
+        ),
+        "delete_ipaddresses_on_sync": is_truthy(
+            app_settings.get("aristacv_delete_ipaddresses_on_sync", constants.DEFAULT_DELETE_IPADDRESSES_ON_SYNC)
+        ),
+        "delete_namespaces_on_sync": is_truthy(
+            app_settings.get("aristacv_delete_namespaces_on_sync", constants.DEFAULT_DELETE_NAMESPACES_ON_SYNC)
+        ),
+        "delete_prefixes_on_sync": is_truthy(
+            app_settings.get("aristacv_delete_prefixes_on_sync", constants.DEFAULT_DELETE_PREFIXES_ON_SYNC)
         ),
         "from_cloudvision_default_site": app_settings.get(
             "aristacv_from_cloudvision_default_site", constants.DEFAULT_SITE
@@ -224,6 +231,28 @@ def verify_device_type_object(device_type):
     return device_type_obj
 
 
+def verify_software_version_object(version, platform):
+    """Verifies whether SoftwareVersion object already exists in Nautobot. If not, creates it with Active status.
+
+    Args:
+        version (str): EOS software version string gathered from CloudVision.
+        platform (Platform): Platform ORM object the SoftwareVersion belongs to.
+
+    Returns:
+        SoftwareVersion: SoftwareVersion object.
+    """
+    try:
+        software_version_obj = SoftwareVersion.objects.get(version=version, platform=platform)
+    except SoftwareVersion.DoesNotExist:
+        software_version_obj = SoftwareVersion(
+            version=version,
+            platform=platform,
+            status=Status.objects.get(name="Active"),
+        )
+        software_version_obj.validated_save()
+    return software_version_obj
+
+
 def verify_device_role_object(role_name, role_color):
     """Verifies device role object exists in Nautobot. If not, creates specified device role.
 
@@ -249,31 +278,6 @@ def verify_import_tag():
         import_tag.content_types.add(ContentType.objects.get_for_model(Device))
         import_tag.validated_save()
     return import_tag
-
-
-def get_device_version(device):
-    """Determines Device version from Custom Field or RelationshipAssociation.
-
-    Args:
-        device (Device): The Device object to determine software version for.
-    """
-    version = ""
-    if dlm_supports_softwarelcm():
-        software_relation = Relationship.objects.get(label="Software on Device")
-        relations = device.get_relationships()
-        try:
-            assigned_versions = relations["destination"][software_relation]
-            if len(assigned_versions) > 0:
-                version = assigned_versions[0].source.version
-            else:
-                return ""
-        except KeyError:
-            pass
-        except IndexError:
-            pass
-    else:
-        version = device.custom_field_data["arista_eos"] if device.custom_field_data.get("arista_eos") else ""
-    return version
 
 
 def parse_hostname(hostname: str, hostname_patterns: list):

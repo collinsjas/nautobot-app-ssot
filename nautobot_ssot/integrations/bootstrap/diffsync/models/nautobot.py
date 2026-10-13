@@ -2,8 +2,8 @@
 
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import pytz
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db.models.deletion import ProtectedError
@@ -20,11 +20,14 @@ from nautobot.dcim.models import Location as ORMLocation
 from nautobot.dcim.models import LocationType as ORMLocationType
 from nautobot.dcim.models import Manufacturer as ORMManufacturer
 from nautobot.dcim.models import Platform as ORMPlatform
+from nautobot.dcim.models import SoftwareImageFile as ORMSoftwareImage
+from nautobot.dcim.models import SoftwareVersion as ORMSoftware
 from nautobot.extras.models import ComputedField as ORMComputedField
 from nautobot.extras.models import Contact as ORMContact
 from nautobot.extras.models import CustomField as ORMCustomField
 from nautobot.extras.models import CustomFieldChoice as ORMCustomFieldChoice
 from nautobot.extras.models import DynamicGroup as ORMDynamicGroup
+from nautobot.extras.models import ExternalIntegration as ORMExternalIntegration
 from nautobot.extras.models import GitRepository as ORMGitRepository
 from nautobot.extras.models import GraphQLQuery as ORMGraphQLQuery
 from nautobot.extras.models import Job as ORMJob
@@ -46,6 +49,7 @@ from nautobot.tenancy.models import Tenant as ORMTenant
 from nautobot.tenancy.models import TenantGroup as ORMTenantGroup
 from nautobot.users.models import User as ORMUser
 
+from nautobot_ssot.integrations.bootstrap.constants import SCOPED_FIELDS_MAPPING
 from nautobot_ssot.integrations.bootstrap.diffsync.models.base import (
     VLAN,
     VRF,
@@ -56,6 +60,7 @@ from nautobot_ssot.integrations.bootstrap.diffsync.models.base import (
     Contact,
     CustomField,
     DynamicGroup,
+    ExternalIntegration,
     GitRepository,
     GraphQLQuery,
     Location,
@@ -71,6 +76,8 @@ from nautobot_ssot.integrations.bootstrap.diffsync.models.base import (
     ScheduledJob,
     Secret,
     SecretsGroup,
+    SoftwareImageFile,
+    SoftwareVersion,
     Tag,
     Team,
     Tenant,
@@ -84,33 +91,12 @@ from nautobot_ssot.integrations.bootstrap.utils import (
     lookup_content_type_id,
     lookup_team_for_contact,
 )
+from nautobot_ssot.integrations.metadata_utils import add_or_update_metadata_on_object
 from nautobot_ssot.utils import (
-    core_supports_softwareversion,
-    dlm_supports_softwarelcm,
     validate_dlm_installed,
 )
 
-if core_supports_softwareversion():
-    from nautobot.dcim.models import SoftwareImageFile as ORMSoftwareImage
-    from nautobot.dcim.models import SoftwareVersion as ORMSoftware
-
-    from nautobot_ssot.integrations.bootstrap.diffsync.models.base import SoftwareImageFile, SoftwareVersion
-
-    _Software_Base_Class = SoftwareVersion
-    _SoftwareImage_Base_Class = SoftwareImageFile
-
-if dlm_supports_softwarelcm():
-    from nautobot_device_lifecycle_mgmt.models import (
-        SoftwareImageLCM as ORMSoftwareImage,
-    )
-    from nautobot_device_lifecycle_mgmt.models import (
-        SoftwareLCM as ORMSoftware,
-    )
-
-    from nautobot_ssot.integrations.bootstrap.diffsync.models.base import Software, SoftwareImage
-
-    _Software_Base_Class = Software
-    _SoftwareImage_Base_Class = SoftwareImage
+_SoftwareImage_Base_Class = SoftwareImageFile
 
 if validate_dlm_installed():
     from nautobot_device_lifecycle_mgmt.models import (
@@ -129,7 +115,7 @@ class NautobotTenantGroup(TenantGroup):
         _parent = None
         if ids["parent"]:
             _parent = ORMTenantGroup.objects.get(name=ids["parent"])
-        adapter.job.logger.info(f'Creating Nautobot TenantGroup: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot TenantGroup: {ids['name']}")
         if _parent is not None:
             new_tenant_group = ORMTenantGroup(name=ids["name"], parent=_parent, description=attrs["description"])
         else:
@@ -137,6 +123,10 @@ class NautobotTenantGroup(TenantGroup):
         new_tenant_group.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_tenant_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_tenant_group.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_tenant_group, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -151,6 +141,10 @@ class NautobotTenantGroup(TenantGroup):
             )
         _update_tenant_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_tenant_group.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_tenant_group, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -182,11 +176,11 @@ class NautobotTenant(Tenant):
                 _tenant_group = ORMTenantGroup.objects.get(name=attrs["tenant_group"])
             except ORMTenantGroup.DoesNotExist:
                 adapter.job.logger.warning(
-                    f'Could not find TenantGroup {attrs["tenant_group"]} to assign to {ids["name"]}'
+                    f"Could not find TenantGroup {attrs['tenant_group']} to assign to {ids['name']}"
                 )
         if "description" in attrs:
             _description = attrs["description"]
-        adapter.job.logger.info(f'Creating Nautobot Tenant: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Tenant: {ids['name']}")
         new_tenant = ORMTenant(
             name=ids["name"],
             tenant_group=_tenant_group,
@@ -196,6 +190,10 @@ class NautobotTenant(Tenant):
         new_tenant.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_tenant.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_tenant.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_tenant, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -208,7 +206,7 @@ class NautobotTenant(Tenant):
                 _update_tenant.tenant_group = ORMTenantGroup.objects.get(name=attrs["tenant_group"])
             except ORMTenantGroup.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'Could not find TenantGroup {attrs["tenant_group"]} to assign to {self.name}'
+                    f"Could not find TenantGroup {attrs['tenant_group']} to assign to {self.name}"
                 )
         if "tags" in attrs:
             # FIXME: There might be a better way to handle this that's easier on the database.
@@ -219,6 +217,10 @@ class NautobotTenant(Tenant):
             _update_tenant.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_tenant.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_tenant.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_tenant, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -240,7 +242,7 @@ class NautobotRole(Role):
     def create(cls, adapter, ids, attrs):
         """Create Role in Nautobot from NautobotRole object."""
         _content_types = []
-        adapter.job.logger.info(f'Creating Nautobot Role: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Role: {ids['name']}")
         for _model in attrs["content_types"]:
             try:
                 _content_types.append(lookup_content_type_for_taggable_model_path(_model))
@@ -257,6 +259,8 @@ class NautobotRole(Role):
         _new_role.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_role.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_role.validated_save()
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=_new_role, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -282,6 +286,10 @@ class NautobotRole(Role):
             _update_role.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_role.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_role.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_role, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -302,11 +310,15 @@ class NautobotManufacturer(Manufacturer):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Manufacturer in Nautobot from NautobotManufacturer object."""
-        adapter.job.logger.debug(f'Creating Nautobot Manufacturer {ids["name"]}')
+        adapter.job.logger.debug(f"Creating Nautobot Manufacturer {ids['name']}")
         _new_manufacturer = ORMManufacturer(name=ids["name"], description=attrs["description"])
         _new_manufacturer.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_manufacturer.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_manufacturer.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_manufacturer, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -319,6 +331,10 @@ class NautobotManufacturer(Manufacturer):
             _update_manufacturer.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_manufacturer.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_manufacturer.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_manufacturer, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -343,7 +359,7 @@ class NautobotPlatform(Platform):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Platform in Nautobot from NautobotPlatform object."""
-        adapter.job.logger.info(f'Creating Nautobot Platform {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Platform {ids['name']}")
         try:
             _manufacturer = None
             if ids["manufacturer"]:
@@ -359,9 +375,13 @@ class NautobotPlatform(Platform):
             _new_platform.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
             _new_platform.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
             _new_platform.validated_save()
+            metadata = add_or_update_metadata_on_object(
+                adapter=adapter, obj=_new_platform, scoped_fields=SCOPED_FIELDS_MAPPING
+            )
+            metadata.validated_save()
         except ORMManufacturer.DoesNotExist:
             adapter.job.logger.warning(
-                f'Manufacturer {ids["manufacturer"]} does not exist in Nautobot, be sure to create it.'
+                f"Manufacturer {ids['manufacturer']} does not exist in Nautobot, be sure to create it."
             )
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
@@ -380,6 +400,10 @@ class NautobotPlatform(Platform):
         if not check_sor_field(_update_platform):
             _update_platform.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_platform.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_platform, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -405,19 +429,19 @@ class NautobotLocationType(LocationType):
     def create(cls, adapter, ids, attrs):
         """Create LocationType in Nautobot from NautobotLocationType object."""
         _content_types = []
-        adapter.job.logger.info(f'Creating Nautobot LocationType: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot LocationType: {ids['name']}")
         _parent = None
         for _model in attrs["content_types"]:
             try:
                 _content_types.append(lookup_content_type_for_taggable_model_path(_model))
             except ContentType.DoesNotExist:
                 adapter.job.logger.error(f"Unable to find ContentType for {_model}.")
-        if "parent" in attrs:
+        if "parent" in attrs and attrs["parent"]:
             try:
                 _parent = ORMLocationType.objects.get(name=attrs["parent"])
             except ORMLocationType.DoesNotExist:
                 adapter.job.logger.warning(
-                    f'Could not find LocationType {attrs["parent"]} in Nautobot, ensure it exists.'
+                    f"Could not find LocationType {attrs['parent']} in Nautobot, ensure it exists."
                 )
         _new_location_type = ORMLocationType(
             name=ids["name"],
@@ -436,6 +460,10 @@ class NautobotLocationType(LocationType):
         _new_location_type.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_location_type.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_location_type.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_location_type, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -449,7 +477,7 @@ class NautobotLocationType(LocationType):
                 _update_location_type.parent = _parent
             except ORMLocationType.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'Parent LocationType {attrs["parent"]} does not exist, ensure it exists first.'
+                    f"Parent LocationType {attrs['parent']} does not exist, ensure it exists first."
                 )
         if "nestable" in attrs:
             _update_location_type.nestable = attrs["nestable"]
@@ -469,6 +497,10 @@ class NautobotLocationType(LocationType):
             )
         _update_location_type.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_location_type.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_location_type, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -493,7 +525,7 @@ class NautobotLocation(Location):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Location in Nautobot from NautobotLocation object."""
-        adapter.job.logger.info(f'Creating Nautobot Location {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Location {ids['name']}")
 
         try:
             _parent = None
@@ -507,11 +539,11 @@ class NautobotLocation(Location):
                     _parent = ORMLocation.objects.get(name=attrs["parent"])
             if "tenant" in attrs:
                 if attrs["tenant"]:
-                    _tenant = Tenant.objects.get(name=attrs["tenant"])
+                    _tenant = ORMTenant.objects.get(name=attrs["tenant"])
             if "time_zone" in attrs:
                 _timezone = None
                 if attrs["time_zone"] and attrs["time_zone"] != "":
-                    _timezone = pytz.timezone(attrs["time_zone"])
+                    _timezone = ZoneInfo(attrs["time_zone"])
             for _tag in attrs["tags"]:
                 _tags.append(ORMTag.objects.get(name=_tag))
             _new_location = ORMLocation(
@@ -536,20 +568,24 @@ class NautobotLocation(Location):
             _new_location.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
             _new_location.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
             _new_location.validated_save()
+            metadata = add_or_update_metadata_on_object(
+                adapter=adapter, obj=_new_location, scoped_fields=SCOPED_FIELDS_MAPPING
+            )
+            metadata.validated_save()
         except ORMStatus.DoesNotExist:
-            adapter.job.logger.warning(f'Status {attrs["status"]} could not be found. Make sure it exists.')
+            adapter.job.logger.warning(f"Status {attrs['status']} could not be found. Make sure it exists.")
         except ORMLocationType.DoesNotExist:
             adapter.job.logger.warning(
-                f'LocationType {attrs["location_type"]} could not be found. Make sure it exists.'
+                f"LocationType {attrs['location_type']} could not be found. Make sure it exists."
             )
         except ORMTenant.DoesNotExist:
-            adapter.job.logger.warning(f'Tenant {attrs["tenant"]} does not exist, verify it is created.')
-        except pytz.UnknownTimeZoneError:
+            adapter.job.logger.warning(f"Tenant {attrs['tenant']} does not exist, verify it is created.")
+        except (ZoneInfoNotFoundError, ValueError):
             adapter.job.logger.warning(
-                f'Timezone {attrs["time_zone"]} could not be found. Verify the timezone is a valid timezone.'
+                f"Timezone {attrs['time_zone']} could not be found. Verify the timezone is a valid timezone."
             )
         except ORMLocation.DoesNotExist:
-            adapter.job.logger.warning(f'Parent Location {attrs["parent"]} does not exist, ensure it exists first.')
+            adapter.job.logger.warning(f"Parent Location {attrs['parent']} does not exist, ensure it exists first.")
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -574,12 +610,12 @@ class NautobotLocation(Location):
         if "time_zone" in attrs:
             _timezone = None
             if attrs["time_zone"] and attrs["time_zone"] != "":
-                _timezone = pytz.timezone(attrs["time_zone"])
+                _timezone = ZoneInfo(attrs["time_zone"])
                 _update_location.time_zone = _timezone
         if "description" in attrs:
             _update_location.description = attrs["description"]
         if "tenant" in attrs:
-            _tenant = Tenant.objects.get(name=attrs["tenant"])
+            _tenant = ORMTenant.objects.get(name=attrs["tenant"])
             _update_location.tenant = _tenant
         if "physical_address" in attrs:
             _update_location.physical_address = attrs["physical_address"]
@@ -606,6 +642,10 @@ class NautobotLocation(Location):
             _update_location.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_location.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_location.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_location, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -630,7 +670,7 @@ class NautobotTeam(Team):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Team in Nautobot from NautobotTeam object."""
-        adapter.job.logger.debug(f'Creating Nautobot Team {ids["name"]}')
+        adapter.job.logger.debug(f"Creating Nautobot Team {ids['name']}")
         _new_team = ORMTeam(
             name=ids["name"],
             phone=attrs["phone"],
@@ -640,6 +680,8 @@ class NautobotTeam(Team):
         _new_team.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_team.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_team.validated_save()
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=_new_team, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         # TODO: Need to consider how to allow loading from teams or contacts models.
         # if "contacts" in attrs:
         #     # FIXME: There might be a better way to handle this that's easier on the database.
@@ -671,6 +713,10 @@ class NautobotTeam(Team):
             _update_team.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_team.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_team.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_team, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -691,7 +737,7 @@ class NautobotContact(Contact):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Contact in Nautobot from NautobotContact object."""
-        adapter.job.logger.debug(f'Creating Nautobot Contact {ids["name"]}')
+        adapter.job.logger.debug(f"Creating Nautobot Contact {ids['name']}")
         _new_contact = ORMContact(
             name=ids["name"],
             phone=attrs["phone"],
@@ -703,9 +749,13 @@ class NautobotContact(Contact):
         _new_contact.validated_save()
         if "teams" in attrs:
             for _team in attrs["teams"]:
-                adapter.job.logger.debug(f'Looking up Team: {_team} for Contact: {ids["name"]}.')
+                adapter.job.logger.debug(f"Looking up Team: {_team} for Contact: {ids['name']}.")
                 _new_contact.teams.add(lookup_team_for_contact(team=_team))
             _new_contact.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_contact, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -728,6 +778,10 @@ class NautobotContact(Contact):
             _update_contact.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_contact.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_contact.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_contact, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -748,7 +802,7 @@ class NautobotProvider(Provider):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Provider in Nautobot from NautobotProvider object."""
-        adapter.job.logger.info(f'Creating Nautobot Provider: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Provider: {ids['name']}")
         if "tags" in attrs:
             _tags = []
             for _tag in attrs["tags"]:
@@ -769,6 +823,10 @@ class NautobotProvider(Provider):
         _new_provider.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_provider.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_provider.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_provider, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -797,6 +855,10 @@ class NautobotProvider(Provider):
             _update_provider.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_provider.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_provider.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_provider, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -817,7 +879,7 @@ class NautobotProviderNetwork(ProviderNetwork):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create ProviderNetwork in Nautobot from NautobotProviderNetwork object."""
-        adapter.job.logger.info(f'Creating Nautobot ProviderNetwork: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot ProviderNetwork: {ids['name']}")
         if "tags" in attrs:
             _tags = []
             for _tag in attrs["tags"]:
@@ -836,6 +898,10 @@ class NautobotProviderNetwork(ProviderNetwork):
         _new_provider_network.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_provider_network.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_provider_network.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_provider_network, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -860,6 +926,10 @@ class NautobotProviderNetwork(ProviderNetwork):
                 {"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")}
             )
         _update_provider_network.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_provider_network, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -880,7 +950,7 @@ class NautobotCircuitType(CircuitType):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create CircuitType in Nautobot from NautobotCircuitType object."""
-        adapter.job.logger.info(f'Creating Nautobot CircuitType: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot CircuitType: {ids['name']}")
         _new_circuit_type = ORMCircuitType(
             name=ids["name"],
             description=attrs["description"],
@@ -888,6 +958,10 @@ class NautobotCircuitType(CircuitType):
         _new_circuit_type.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_circuit_type.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_circuit_type.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_circuit_type, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -902,6 +976,10 @@ class NautobotCircuitType(CircuitType):
                 {"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")}
             )
         _update_circuit_type.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_circuit_type, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -922,7 +1000,7 @@ class NautobotCircuit(Circuit):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Circuit in Nautobot from NautobotCircuit object."""
-        adapter.job.logger.info(f'Creating Nautobot Circuit: {ids["circuit_id"]}')
+        adapter.job.logger.info(f"Creating Nautobot Circuit: {ids['circuit_id']}")
         if "tags" in attrs:
             _tags = []
             for _tag in attrs["tags"]:
@@ -952,6 +1030,10 @@ class NautobotCircuit(Circuit):
         _new_circuit.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_circuit.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_circuit.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_circuit, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -988,6 +1070,10 @@ class NautobotCircuit(Circuit):
             _update_circuit.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_circuit.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_circuit.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_circuit, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1008,7 +1094,7 @@ class NautobotCircuitTermination(CircuitTermination):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create CircuitTermination in Nautobot from NautobotCircuitTermination object."""
-        adapter.job.logger.info(f'Creating Nautobot CircuitTermination {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot CircuitTermination {ids['name']}")
         _name_parts = ids["name"].split("__", 2)
         _circuit_id = _name_parts[0]
         _provider_name = _name_parts[1]
@@ -1030,7 +1116,7 @@ class NautobotCircuitTermination(CircuitTermination):
                 _provider_network = ORMProviderNetwork.objects.get(name=attrs["provider_network"])
             except ORMProviderNetwork.DoesNotExist:
                 adapter.job.logger.warning(
-                    f'ProviderNetwork {attrs["provider_network"]} does not exist in Nautobot. Please create it.'
+                    f"ProviderNetwork {attrs['provider_network']} does not exist in Nautobot. Please create it."
                 )
             _new_circuit_termination = ORMCircuitTermination(
                 provider_network=_provider_network,
@@ -1047,7 +1133,7 @@ class NautobotCircuitTermination(CircuitTermination):
                 _location = ORMLocation.objects.get(name=attrs["location"])
             except ORMLocation.DoesNotExist:
                 adapter.job.logger.warning(
-                    f'Location {attrs["location"]} does not exist in Nautobot. Please create it.'
+                    f"Location {attrs['location']} does not exist in Nautobot. Please create it."
                 )
             _new_circuit_termination = ORMCircuitTermination(
                 location=_location,
@@ -1069,6 +1155,10 @@ class NautobotCircuitTermination(CircuitTermination):
         )
         _new_circuit_termination.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_circuit_termination.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_circuit_termination, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1083,7 +1173,7 @@ class NautobotCircuitTermination(CircuitTermination):
                 _update_circuit_termination.location = _location
             except ORMLocation.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'Location {attrs["location"]} does not exist in Nautobot. Please create it.'
+                    f"Location {attrs['location']} does not exist in Nautobot. Please create it."
                 )
         if "provider_network" in attrs:
             try:
@@ -1093,16 +1183,16 @@ class NautobotCircuitTermination(CircuitTermination):
                 _update_circuit_termination.provider_network = _provider_network
             except ORMProviderNetwork.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'ProviderNetwork {attrs["provider_network"]} does not exist in Nautobot. Please create it.'
+                    f"ProviderNetwork {attrs['provider_network']} does not exist in Nautobot. Please create it."
                 )
         if "port_speed_kbps" in attrs:
             _update_circuit_termination.port_speed = attrs["port_speed_kbps"]
         if "upstream_speed_kbps" in attrs:
             _update_circuit_termination.upstream_speed = attrs["upstream_speed_kbps"]
         if "cross_connect_id" in attrs:
-            _update_circuit_termination.xconnect_id = attrs["xconnect_id"]
+            _update_circuit_termination.xconnect_id = attrs["cross_connect_id"]
         if "patch_panel_or_ports" in attrs:
-            _update_circuit_termination.pp_info = attrs["pp_info"]
+            _update_circuit_termination.pp_info = attrs["patch_panel_or_ports"]
         if "description" in attrs:
             _update_circuit_termination.description = attrs["description"]
         if "tags" in attrs:
@@ -1121,6 +1211,10 @@ class NautobotCircuitTermination(CircuitTermination):
                 {"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")}
             )
         _update_circuit_termination.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_circuit_termination, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1141,7 +1235,7 @@ class NautobotNamespace(Namespace):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Namespace in Nautobot from NautobotNamespace object."""
-        adapter.job.logger.info(f'Creating Nautobot Namespace {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Namespace {ids['name']}")
         new_namespace = ORMNamespace(
             name=ids["name"],
             description=attrs["description"],
@@ -1156,9 +1250,12 @@ class NautobotNamespace(Namespace):
                 new_namespace.validated_save()
             except ORMLocation.DoesNotExist:
                 adapter.job.logger.warning(
-                    f'Nautobot Location {attrs["location"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Location {attrs['location']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_namespace, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1173,13 +1270,16 @@ class NautobotNamespace(Namespace):
                 _update_namespace.location = _location
             except ORMLocation.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'Nautobot Location {attrs["location"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Location {attrs['location']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         if not check_sor_field(_update_namespace):
             _update_namespace.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_namespace.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_namespace.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_namespace, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1204,7 +1304,7 @@ class NautobotRiR(RiR):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create RiR in Nautobot from NautobotRiR object."""
-        adapter.job.logger.info(f'Creating Nautobot RiR: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot RiR: {ids['name']}")
         new_rir = ORMRiR(
             name=ids["name"],
             is_private=attrs["private"],
@@ -1213,7 +1313,8 @@ class NautobotRiR(RiR):
         new_rir.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_rir.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_rir.validated_save()
-
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=new_rir, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1228,7 +1329,10 @@ class NautobotRiR(RiR):
             _update_rir.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_rir.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_rir.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_rir, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1253,13 +1357,13 @@ class NautobotVLANGroup(VLANGroup):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create VLANGroup in Nautobot from NautobotVLANGroup object."""
-        adapter.job.logger.info(f'Creating Nautobot VLANGroup: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot VLANGroup: {ids['name']}")
         try:
             _location = ORMLocation.objects.get(name=attrs["location"])
         except ORMLocation.DoesNotExist:
             _location = None
             adapter.job.logger.warning(
-                f'Nautobot Location {attrs["location"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                f"Nautobot Location {attrs['location']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
             )
         new_vlan_group = ORMVLANGroup(
             name=ids["name"],
@@ -1269,7 +1373,10 @@ class NautobotVLANGroup(VLANGroup):
         new_vlan_group.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_vlan_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_vlan_group.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_vlan_group, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1282,7 +1389,7 @@ class NautobotVLANGroup(VLANGroup):
             except ORMLocation.DoesNotExist:
                 _location = None
                 self.adapter.job.logger.warning(
-                    f'Nautobot Location {attrs["location"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Location {attrs['location']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
             _update_vlan_group.location = _location
         if "description" in attrs:
@@ -1293,7 +1400,10 @@ class NautobotVLANGroup(VLANGroup):
             )
         _update_vlan_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_vlan_group.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_vlan_group, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1319,21 +1429,21 @@ class NautobotVLAN(VLAN):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create VLAN in Nautobot from NautobotVLAN object."""
-        adapter.job.logger.info(f'Creating Nautobot VLAN: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot VLAN: {ids['name']}")
         try:
             _vlan_group = ORMVLANGroup.objects.get(name=ids["vlan_group"])
         except ORMVLANGroup.DoesNotExist:
             _vlan_group = None
             if ids["vlan_group"]:
                 adapter.job.logger.warning(
-                    f'Nautobot VLANGroup {ids["vlan_group"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot VLANGroup {ids['vlan_group']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             _status = ORMStatus.objects.get(name=attrs["status"])
         except ORMStatus.DoesNotExist:
             _status = ORMStatus.objects.get(name="Active")
             adapter.job.logger.warning(
-                f'Nautobot Status {attrs["status"]} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active.'
+                f"Nautobot Status {attrs['status']} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active."
             )
         try:
             _role = ORMRole.objects.get(name=attrs["role"])
@@ -1341,7 +1451,7 @@ class NautobotVLAN(VLAN):
             _role = None
             if attrs["role"]:
                 adapter.job.logger.warning(
-                    f'Nautobot Role {attrs["role"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Role {attrs['role']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             _tenant = ORMTenant.objects.get(name=attrs["tenant"])
@@ -1349,7 +1459,7 @@ class NautobotVLAN(VLAN):
             _tenant = None
             if attrs["tenant"]:
                 adapter.job.logger.warning(
-                    f'Nautobot Tenant {attrs["tenant"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Tenant {attrs['tenant']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             if "tags" in attrs:
@@ -1358,7 +1468,7 @@ class NautobotVLAN(VLAN):
                     _tags.append(ORMTag.objects.get(name=tag))
         except ORMTag.DoesNotExist:
             adapter.job.logger.warning(
-                f'Nautobot Tag {attrs["tags"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                f"Nautobot Tag {attrs['tags']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
             )
         new_vlan = ORMVLAN(
             name=ids["name"],
@@ -1385,12 +1495,13 @@ class NautobotVLAN(VLAN):
         except ORMLocation.DoesNotExist:
             _location = None
             adapter.job.logger.warning(
-                f'Nautobot Location {attrs["location"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                f"Nautobot Location {attrs['location']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
             )
         if _locations:
             for _location in _locations:
                 new_vlan.locations.add(_location)
-
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=new_vlan, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1405,7 +1516,7 @@ class NautobotVLAN(VLAN):
             except ORMStatus.DoesNotExist:
                 _status = ORMStatus.objects.get(name="Active")
                 self.adapter.job.logger.warning(
-                    f'Nautobot Status {attrs["status"]} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active.'
+                    f"Nautobot Status {attrs['status']} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active."
                 )
             _update_vlan.status = _status
         if "role" in attrs:
@@ -1415,7 +1526,7 @@ class NautobotVLAN(VLAN):
                 _role = None
                 if attrs["role"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot Role {attrs["role"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Role {attrs['role']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_vlan.role = _role
         if "tenant" in attrs:
@@ -1425,7 +1536,7 @@ class NautobotVLAN(VLAN):
                 _tenant = None
                 if attrs["tenant"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot Tenant {attrs["tenant"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Tenant {attrs['tenant']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_vlan.tenant = _tenant
         if "tags" in attrs:
@@ -1436,7 +1547,7 @@ class NautobotVLAN(VLAN):
                         _tags.append(ORMTag.objects.get(name=tag))
             except ORMTag.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'Nautobot Tag {attrs["tags"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Tag {attrs['tags']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         if attrs.get("tags"):
             _update_vlan.validated_save()
@@ -1454,7 +1565,7 @@ class NautobotVLAN(VLAN):
             except ORMLocation.DoesNotExist:
                 _location = None
                 self.adapter.job.logger.warning(
-                    f'Nautobot Location {attrs["location"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Location {attrs['location']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
             if _locations:
                 for _location in _locations:
@@ -1463,6 +1574,10 @@ class NautobotVLAN(VLAN):
             _update_vlan.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_vlan.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_vlan.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_vlan, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1487,21 +1602,21 @@ class NautobotVRF(VRF):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create VRF in Nautobot from NautobotVRF object."""
-        adapter.job.logger.info(f'Creating Nautobot VRF: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot VRF: {ids['name']}")
         try:
             _tenant = ORMTenant.objects.get(name=attrs["tenant"])
         except ORMTenant.DoesNotExist:
             _tenant = None
             if attrs["tenant"]:
                 adapter.job.logger.warning(
-                    f'Nautobot Tenant {attrs["tenant"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Tenant {attrs['tenant']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             _namespace = ORMNamespace.objects.get(name=ids["namespace"])
         except ORMNamespace.DoesNotExist:
             _namespace = ORMNamespace.objects.get(name="Global")
             adapter.job.logger.warning(
-                f'Nautobot Namespace {ids["namespace"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                f"Nautobot Namespace {ids['namespace']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
             )
         new_vrf = ORMVRF(
             name=ids["name"],
@@ -1518,6 +1633,8 @@ class NautobotVRF(VRF):
         new_vrf.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_vrf.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_vrf.validated_save()
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=new_vrf, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1531,7 +1648,7 @@ class NautobotVRF(VRF):
                 _tenant = None
                 if attrs["tenant"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot Tenant {attrs["tenant"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Tenant {attrs['tenant']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_vrf.tenant = _tenant
         if "description" in attrs:
@@ -1546,6 +1663,10 @@ class NautobotVRF(VRF):
             _update_vrf.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_vrf.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_vrf.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_vrf, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1570,13 +1691,13 @@ class NautobotPrefix(Prefix):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Prefix in Nautobot from NautobotPrefix object."""
-        adapter.job.logger.info(f'Creating Nautobot Prefix: {ids["network"]} in Namespace: {ids["namespace"]}')
+        adapter.job.logger.info(f"Creating Nautobot Prefix: {ids['network']} in Namespace: {ids['namespace']}")
         try:
             _namespace = ORMNamespace.objects.get(name=ids["namespace"])
         except ORMNamespace.DoesNotExist:
             _namespace = ORMNamespace.objects.get(name="Global")
             adapter.job.logger.warning(
-                f'Nautobot Namespace {ids["namespace"]} does not exist. Defaulting to Global Namespace.'
+                f"Nautobot Namespace {ids['namespace']} does not exist. Defaulting to Global Namespace."
             )
         try:
             if attrs["vlan"]:
@@ -1593,20 +1714,20 @@ class NautobotPrefix(Prefix):
             _vlan = None
             if attrs["vlan"]:
                 adapter.job.logger.warning(
-                    f'Nautobot VLANGroup {attrs["vlan"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot VLANGroup {attrs['vlan']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         except ORMVLAN.DoesNotExist:
             _vlan = None
             if attrs["vlan"]:
                 adapter.job.logger.warning(
-                    f'Nautobot VLAN {attrs["vlan"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot VLAN {attrs['vlan']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             _status = ORMStatus.objects.get(name=attrs["status"])
         except ORMStatus.DoesNotExist:
             _status = ORMStatus.objects.get(name="Active")
             adapter.job.logger.warning(
-                f'Nautobot Status {attrs["status"]} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active.'
+                f"Nautobot Status {attrs['status']} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active."
             )
         try:
             _role = ORMRole.objects.get(name=attrs["role"])
@@ -1614,7 +1735,7 @@ class NautobotPrefix(Prefix):
             _role = None
             if attrs["role"]:
                 adapter.job.logger.warning(
-                    f'Nautobot Role {attrs["role"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Role {attrs['role']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             _tenant = ORMTenant.objects.get(name=attrs["tenant"])
@@ -1622,7 +1743,7 @@ class NautobotPrefix(Prefix):
             _tenant = None
             if attrs["tenant"]:
                 adapter.job.logger.warning(
-                    f'Nautobot Tenant {attrs["tenant"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Tenant {attrs['tenant']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             _rir = ORMRiR.objects.get(name=attrs["rir"])
@@ -1630,7 +1751,7 @@ class NautobotPrefix(Prefix):
             _rir = None
             if attrs["rir"]:
                 adapter.job.logger.warning(
-                    f'Nautobot RiR {attrs["rir"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot RiR {attrs['rir']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         try:
             if "tags" in attrs:
@@ -1639,13 +1760,13 @@ class NautobotPrefix(Prefix):
                     _tags.append(ORMTag.objects.get(name=tag))
         except ORMTag.DoesNotExist:
             adapter.job.logger.warning(
-                f'Nautobot Tag {attrs["tags"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                f"Nautobot Tag {attrs['tags']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
             )
 
         network_parts = ids["network"].strip().split("/")
         if len(network_parts) != 2:
             adapter.job.logger.error(
-                f'Invalid network format: {ids["network"]}. Expected format: network/prefix_length'
+                f"Invalid network format: {ids['network']}. Expected format: network/prefix_length"
             )
             return None
 
@@ -1656,7 +1777,7 @@ class NautobotPrefix(Prefix):
             # Validate network address format
             if not network_address or prefix_length < 0 or prefix_length > 128:
                 adapter.job.logger.Warning(
-                    f'Invalid network address or prefix length: {ids["network"]} skipping. Format should be network/prefix_length.'
+                    f"Invalid network address or prefix length: {ids['network']} skipping. Format should be network/prefix_length."
                 )
                 return None
 
@@ -1690,7 +1811,7 @@ class NautobotPrefix(Prefix):
             except ORMLocation.DoesNotExist:
                 _location = None
                 adapter.job.logger.warning(
-                    f'Nautobot Location {attrs["locations"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Location {attrs['locations']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
             if _locations:
                 for _location in _locations:
@@ -1711,18 +1832,21 @@ class NautobotPrefix(Prefix):
                 _vrf = None
                 if attrs["vrfs"]:
                     adapter.job.logger.warning(
-                        f'Nautobot Namespace {attrs["vrfs"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Namespace {attrs['vrfs']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             except ORMVRF.DoesNotExist:
                 _vrf = None
                 adapter.job.logger.warning(
-                    f'Nautobot VRF {attrs["vrfs"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot VRF {attrs['vrfs']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
-
+            metadata = add_or_update_metadata_on_object(
+                adapter=adapter, obj=new_prefix, scoped_fields=SCOPED_FIELDS_MAPPING
+            )
+            metadata.validated_save()
             return super().create(adapter=adapter, ids=ids, attrs=attrs)
         except ValueError:
             adapter.job.logger.error(
-                f'Invalid network format: {ids["network"]}. Expected format: network/prefix_length'
+                f"Invalid network format: {ids['network']}. Expected format: network/prefix_length"
             )
             return None
 
@@ -1750,13 +1874,13 @@ class NautobotPrefix(Prefix):
                 _vlan = None
                 if attrs["vlan"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot VLANGroup {attrs["vlan"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot VLANGroup {attrs['vlan']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             except ORMVLAN.DoesNotExist:
                 _vlan = None
                 if attrs["vlan"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot VLAN {attrs["vlan"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot VLAN {attrs['vlan']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_prefix.vlan = _vlan
         if "status" in attrs:
@@ -1765,7 +1889,7 @@ class NautobotPrefix(Prefix):
             except ORMStatus.DoesNotExist:
                 _status = ORMStatus.objects.get(name="Active")
                 self.adapter.job.logger.warning(
-                    f'Nautobot Status {attrs["status"]} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active.'
+                    f"Nautobot Status {attrs['status']} does not exist. Make sure it is created manually or defined in global_settings.yaml. Defaulting to Status Active."
                 )
             _update_prefix.status = _status
         if "role" in attrs:
@@ -1775,7 +1899,7 @@ class NautobotPrefix(Prefix):
                 _role = None
                 if attrs["role"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot Role {attrs["role"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Role {attrs['role']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_prefix.role = _role
         if "tenant" in attrs:
@@ -1785,7 +1909,7 @@ class NautobotPrefix(Prefix):
                 _tenant = None
                 if attrs["tenant"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot Tenant {attrs["tenant"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Tenant {attrs['tenant']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_prefix.tenant = _tenant
         if "rir" in attrs:
@@ -1795,7 +1919,7 @@ class NautobotPrefix(Prefix):
                 _rir = None
                 if attrs["rir"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot RiR {attrs["rir"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot RiR {attrs['rir']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             _update_prefix.rir = _rir
         if "date_allocated" in attrs:
@@ -1809,7 +1933,7 @@ class NautobotPrefix(Prefix):
                     _update_prefix.tags.add(_tag)
             except ORMTag.DoesNotExist:
                 self.adapter.job.logger.warning(
-                    f'Nautobot Tag {attrs["tags"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Tag {attrs['tags']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         if "locations" in attrs:
             try:
@@ -1822,7 +1946,7 @@ class NautobotPrefix(Prefix):
             except ORMLocation.DoesNotExist:
                 _location = None
                 self.adapter.job.logger.warning(
-                    f'Nautobot Location {attrs["locations"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot Location {attrs['locations']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
             if _locations:
                 _update_prefix.locations.clear()
@@ -1847,18 +1971,21 @@ class NautobotPrefix(Prefix):
                 _vrf = None
                 if attrs["vrfs"]:
                     self.adapter.job.logger.warning(
-                        f'Nautobot Namespace {attrs["vrfs"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                        f"Nautobot Namespace {attrs['vrfs']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                     )
             except ORMVRF.DoesNotExist:
                 _vrf = None
                 self.adapter.job.logger.warning(
-                    f'Nautobot VRF {attrs["vrfs"]} does not exist. Make sure it is created manually or defined in global_settings.yaml'
+                    f"Nautobot VRF {attrs['vrfs']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
                 )
         if not check_sor_field(_update_prefix):
             _update_prefix.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_prefix.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_prefix.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_prefix, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1883,11 +2010,15 @@ class NautobotSecret(Secret):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create Secret in Nautobot from NautobotSecret object."""
-        adapter.job.logger.info(f'Creating Nautobot Secret: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Secret: {ids['name']}")
         new_secret = ORMSecret(name=ids["name"], provider=attrs["provider"], parameters=attrs["parameters"])
         new_secret.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_secret.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_secret.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_secret, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -1901,6 +2032,10 @@ class NautobotSecret(Secret):
         if not check_sor_field(_update_secret):
             _update_secret.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_secret.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_secret, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1921,26 +2056,35 @@ class NautobotSecretsGroup(SecretsGroup):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create SecretsGroup in Nautobot from NautobotSecretsGroup object."""
-        adapter.job.logger.info(f'Creating Nautobot SecretsGroup: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot SecretsGroup: {ids['name']}")
         _new_secrets_group = ORMSecretsGroup(name=ids["name"])
         _new_secrets_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_secrets_group.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_secrets_group.validated_save()
 
-        for _secret in attrs["secrets"]:
-            try:
-                _orm_secret = ORMSecret.objects.get(name=_secret["name"])
-                _new_secrets_group.secrets.add(_orm_secret)
-                _new_secrets_group.validated_save()
-                _sga = _new_secrets_group.secrets_group_associations.get(secret__id=_orm_secret.id)
-                _sga.access_type = _secret["access_type"]
-                _sga.secret_type = _secret["secret_type"]
-                _sga.validated_save()
-                return super().create(adapter=adapter, ids=ids, attrs=attrs)
-            except ORMSecret.DoesNotExist:
-                adapter.job.logger.warning(
-                    f'Secret - {_secret["name"]} does not exist in Nautobot, ensure it is created.'
-                )
+        if "secrets" in attrs:
+            for _secret in attrs["secrets"]:
+                try:
+                    _orm_secret = ORMSecret.objects.get(name=_secret["name"])
+                    try:
+                        _sga = _new_secrets_group.secrets_group_associations.get(secret__id=_orm_secret.id)
+                    except ORMSecretsGroupAssociation.DoesNotExist:
+                        _sga = ORMSecretsGroupAssociation(
+                            secrets_group=_new_secrets_group,
+                            secret=_orm_secret,
+                        )
+                    _sga.access_type = _secret["access_type"]
+                    _sga.secret_type = _secret["secret_type"]
+                    _sga.validated_save()
+                    metadata = add_or_update_metadata_on_object(
+                        adapter=adapter, obj=_new_secrets_group, scoped_fields=SCOPED_FIELDS_MAPPING
+                    )
+                    metadata.validated_save()
+                except ORMSecret.DoesNotExist:
+                    adapter.job.logger.warning(
+                        f"Secret - {_secret['name']} does not exist in Nautobot, ensure it is created."
+                    )
+        return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
         """Update SecretsGroup in Nautobot from NautobotSecretsGroup object."""
@@ -1951,7 +2095,7 @@ class NautobotSecretsGroup(SecretsGroup):
                 try:
                     _orm_secret = ORMSecret.objects.get(name=_secret["name"])
                     try:
-                        _sga = _update_group.secrets_group_association.get(secret__id=_orm_secret.id)
+                        _sga = _update_group.secrets_group_associations.get(secret__id=_orm_secret.id)
                     except ORMSecretsGroupAssociation.DoesNotExist:
                         _sga = ORMSecretsGroupAssociation(
                             secrets_group=_update_group,
@@ -1962,7 +2106,7 @@ class NautobotSecretsGroup(SecretsGroup):
                     _sga.validated_save()
                 except ORMSecret.DoesNotExist:
                     self.adapter.job.logger.warning(
-                        f'Secret - {_secret["name"]} does not exist in Nautobot, ensure it is created.'
+                        f"Secret - {_secret['name']} does not exist in Nautobot, ensure it is created."
                     )
                     return None
 
@@ -1970,6 +2114,10 @@ class NautobotSecretsGroup(SecretsGroup):
             _update_group.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_group.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_group, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -1990,7 +2138,7 @@ class NautobotGitRepository(GitRepository):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create GitRepository in Nautobot from NautobotGitRepository object."""
-        adapter.job.logger.info(f'Creating Nautobot Git Repository: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Git Repository: {ids['name']}")
         _secrets_group = None
         if attrs.get("secrets_group"):
             _secrets_group = ORMSecretsGroup.objects.get(name=attrs["secrets_group"])
@@ -2004,6 +2152,10 @@ class NautobotGitRepository(GitRepository):
         new_gitrepository.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         new_gitrepository.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         new_gitrepository.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_gitrepository, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2023,6 +2175,10 @@ class NautobotGitRepository(GitRepository):
             _update_git_repo.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_git_repo.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_git_repo.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_git_repo, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2043,11 +2199,11 @@ class NautobotDynamicGroup(DynamicGroup):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create DynamicGroup in Nautobot from NautobotDynamicGroup object."""
-        adapter.job.logger.info(f'Creating Nautobot Dynamic Group: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Dynamic Group: {ids['name']}")
         _content_type_id = lookup_content_type_id(nb_model="dynamic_groups", model_path=ids["content_type"])
         if _content_type_id is None:
             adapter.job.logger.warning(
-                f'Could not find ContentType for {ids["label"]} with ContentType {ids["content_type"]}'
+                f"Could not find ContentType for {ids['label']} with ContentType {ids['content_type']}"
             )
         _content_type = ContentType.objects.get_for_id(id=_content_type_id)
         _new_nb_dg = ORMDynamicGroup(
@@ -2068,6 +2224,10 @@ class NautobotDynamicGroup(DynamicGroup):
                 _new_nb_dg.description = attrs["description"]
             _new_nb_dg.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
             _new_nb_dg.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_nb_dg, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2082,6 +2242,10 @@ class NautobotDynamicGroup(DynamicGroup):
             _update_dyn_group.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_dyn_group.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_dyn_group.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_dyn_group, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2102,17 +2266,21 @@ class NautobotComputedField(ComputedField):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create ComputedField in Nautobot from NautobotComputedField object."""
-        adapter.job.logger.info(f'Creating Nautobot Computed Field: {ids["label"]}')
+        adapter.job.logger.info(f"Creating Nautobot Computed Field: {ids['label']}")
         _content_type_id = lookup_content_type_id(nb_model="custom_fields", model_path=attrs["content_type"])
         if _content_type_id is None:
             adapter.job.logger.warning(
-                f'Could not find ContentType for {ids["label"]} with ContentType {attrs["content_type"]}'
+                f"Could not find ContentType for {ids['label']} with ContentType {attrs['content_type']}"
             )
         _content_type = ContentType.objects.get_for_id(id=_content_type_id)
         _new_computed_field = ORMComputedField(
             label=ids["label"], content_type=_content_type, template=attrs["template"]
         )
         _new_computed_field.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_computed_field, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2123,13 +2291,17 @@ class NautobotComputedField(ComputedField):
             _content_type_id = lookup_content_type_id(nb_model="custom_fields", model_path=attrs["content_type"])
             if _content_type_id is None:
                 self.adapter.job.logger.warning(
-                    f'Could not find ContentType for {self["label"]} with ContentType {attrs["content_type"]}'
+                    f"Could not find ContentType for {self['label']} with ContentType {attrs['content_type']}"
                 )
             _content_type = ContentType.objects.get_for_id(id=_content_type_id)
             comp_field.content_type = _content_type
         if attrs.get("template"):
             comp_field.template = attrs["template"]
         comp_field.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=comp_field, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2151,7 +2323,7 @@ class NautobotCustomField(CustomField):
     def create(cls, adapter, ids, attrs):
         """Create CustomField in Nautobot from NautobotCustomField object."""
         _content_types = []
-        adapter.job.logger.info(f'Creating Nautobot Custom Field: {ids["label"]}')
+        adapter.job.logger.info(f"Creating Nautobot Custom Field: {ids['label']}")
 
         for _model in attrs["content_types"]:
             try:
@@ -2181,7 +2353,10 @@ class NautobotCustomField(CustomField):
                 value=choice["value"], weight=choice["weight"], custom_field=_new_custom_field
             )
             _new_cf.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_custom_field, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2225,6 +2400,10 @@ class NautobotCustomField(CustomField):
                 _new_cf.validated_save()
 
         cust_field.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=cust_field, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2246,7 +2425,7 @@ class NautobotTag(Tag):
     def create(cls, adapter, ids, attrs):
         """Create Tag in Nautobot from NautobotTag object."""
         _content_types = []
-        adapter.job.logger.info(f'Creating Nautobot Tag: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot Tag: {ids['name']}")
         for _model in attrs["content_types"]:
             adapter.job.logger.debug(f"Looking up {_model} in content types.")
             try:
@@ -2264,6 +2443,8 @@ class NautobotTag(Tag):
         _new_tag.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_tag.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_tag.validated_save()
+        metadata = add_or_update_metadata_on_object(adapter=adapter, obj=_new_tag, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2287,6 +2468,10 @@ class NautobotTag(Tag):
             _update_tag.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_tag.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_tag.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_tag, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2307,9 +2492,13 @@ class NautobotGraphQLQuery(GraphQLQuery):
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create GraphQLQuery in Nautobot from NautobotGraphQLQuery object."""
-        adapter.job.logger.info(f'Creating Nautobot GraphQLQuery: {ids["name"]}')
+        adapter.job.logger.info(f"Creating Nautobot GraphQLQuery: {ids['name']}")
         _new_query = ORMGraphQLQuery(name=ids["name"], query=attrs["query"])
         _new_query.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_query, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2319,6 +2508,10 @@ class NautobotGraphQLQuery(GraphQLQuery):
         if attrs.get("query"):
             _query.query = attrs["query"]
         _query.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_query, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2374,13 +2567,15 @@ class NautobotScheduledJob(ScheduledJob):
             interval=attrs.get("interval"),
             start_time=attrs.get("start_time"),
             crontab=attrs.get("crontab"),
-            approval_required=attrs.get("approval_required"),
             kwargs=job_kwargs,
             celery_kwargs=celery_kwargs,
             enabled=attrs.get("enabled"),
         )
         scheduled_job.validated_save()
-
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=scheduled_job, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2418,14 +2613,14 @@ class NautobotScheduledJob(ScheduledJob):
             job.kwargs = attrs["job_vars"]
         if "profile" in attrs:
             job.celery_kwargs["nautobot_job_profile"] = attrs["profile"]
-        if "approval_required" in attrs:
-            job.approval_required = attrs["approval_required"]
         if "task_queue" in attrs:
             job.celery_kwargs["queue"] = attrs["task_queue"]
         if "enabled" in attrs:
             job.enabled = attrs["enabled"]
 
         job.validated_save()
+        metadata = add_or_update_metadata_on_object(adapter=self.adapter, obj=job, scoped_fields=SCOPED_FIELDS_MAPPING)
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
@@ -2442,7 +2637,7 @@ class NautobotScheduledJob(ScheduledJob):
     from django.utils.dateparse import parse_datetime
 
 
-class NautobotSoftware(_Software_Base_Class):
+class NautobotSoftware(SoftwareVersion):
     """Nautobot implementation of Bootstrap Software model."""
 
     @classmethod
@@ -2454,36 +2649,19 @@ class NautobotSoftware(_Software_Base_Class):
         _tags = []
         for tag in attrs["tags"]:
             _tags.append(ORMTag.objects.get(name=tag))
-        if core_supports_softwareversion():
-            _status = ORMStatus.objects.get(name=attrs["status"])
+        _status = ORMStatus.objects.get(name=attrs["status"])
         _platform = ORMPlatform.objects.get(name=ids["platform"])
-        if dlm_supports_softwarelcm():
-            _new_software = ORMSoftware(
-                version=ids["version"],
-                alias=attrs["alias"],
-                device_platform=_platform,
-                end_of_support_date=attrs["eos_date"],
-                long_term_support=attrs["long_term_support"],
-                pre_release=attrs["pre_release"],
-                documentation_url=attrs["documentation_url"],
-            )
-        elif core_supports_softwareversion():
-            _new_software = ORMSoftware(
-                version=ids["version"],
-                alias=attrs["alias"],
-                status=_status,
-                platform=_platform,
-                end_of_support_date=attrs["eos_date"],
-                long_term_support=attrs["long_term_support"],
-                pre_release=attrs["pre_release"],
-                documentation_url=attrs["documentation_url"],
-            )
-        else:
-            adapter.job.logger.error(
-                f"Software model not found so skipping creation of {ids['version']} for {ids['platform']}."
-            )
-            return None
-        adapter.job.logger.info(f'Creating Nautobot Software object {ids["platform"]} - {ids["version"]}.')
+        _new_software = ORMSoftware(
+            version=ids["version"],
+            alias=attrs["alias"],
+            platform=_platform,
+            end_of_support_date=attrs["eos_date"],
+            long_term_support=attrs["long_term_support"],
+            pre_release=attrs["pre_release"],
+            documentation_url=attrs["documentation_url"],
+            status=_status,
+        )
+        adapter.job.logger.info(f"Creating Nautobot Software object {ids['platform']} - {ids['version']}.")
         if attrs.get("tags"):
             _new_software.validated_save()
             _new_software.tags.clear()
@@ -2492,6 +2670,10 @@ class NautobotSoftware(_Software_Base_Class):
         _new_software.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_software.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_software.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_software, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
@@ -2499,10 +2681,7 @@ class NautobotSoftware(_Software_Base_Class):
         if self.adapter.job.debug:
             self.adapter.job.logger.debug(f"Updating Software: {self.platform} - {self.version}.")
         _platform = ORMPlatform.objects.get(name=self.platform)
-        if dlm_supports_softwarelcm():
-            _update_software = ORMSoftware.objects.get(version=self.version, device_platform=_platform)
-        if core_supports_softwareversion():
-            _update_software = ORMSoftware.objects.get(version=self.version, platform=_platform)
+        _update_software = ORMSoftware.objects.get(version=self.version, platform=_platform)
         self.adapter.job.logger.info(f"Updating Software: {self.platform} - {self.version}.")
         if "alias" in attrs:
             _update_software.alias = attrs["alias"]
@@ -2511,10 +2690,7 @@ class NautobotSoftware(_Software_Base_Class):
         if attrs.get("release_date"):
             _update_software.release_date = attrs["release_date"]
         if attrs.get("eos_date"):
-            if core_supports_softwareversion():
-                _update_software.end_of_support_date = attrs["eos_date"]
-            else:
-                _update_software.end_of_support = attrs["eos_date"]
+            _update_software.end_of_support_date = attrs["eos_date"]
         if attrs.get("long_term_support"):
             _update_software.long_term_support = attrs["long_term_support"]
         if attrs.get("pre_release"):
@@ -2532,13 +2708,18 @@ class NautobotSoftware(_Software_Base_Class):
             _update_software.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _update_software.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_software.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_software, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
         """Delete Software in Nautobot from NautobotSoftware object."""
         try:
             _platform = ORMPlatform.objects.get(name=self.platform)
-            _software = ORMSoftware.objects.get(version=self.version, device_platform=_platform)
+            _software = ORMSoftware.objects.get(version=self.version, platform=_platform)
+            self.adapter.job.logger.warning(f"Deleting Nautobot Software Object ({self.platform} - {self.version}.)")
             super().delete()
             _software.delete()
             return self
@@ -2546,86 +2727,64 @@ class NautobotSoftware(_Software_Base_Class):
             self.adapter.job.logger.warning(
                 f"Unable to find Software {self.platform} - {self.version} for deletion. {err}"
             )
+        except ProtectedError as err:
+            self.adapter.job.logger.warning(
+                f"Unable to delete Software {self.platform} - {self.version}, as it is referenced by another object. {err}"
+            )
 
 
-class NautobotSoftwareImage(_SoftwareImage_Base_Class):
+class NautobotSoftwareImage(SoftwareImageFile):
     """Nautobot implementation of Bootstrap SoftwareImage model."""
 
     @classmethod
     def create(cls, adapter, ids, attrs):
         """Create SoftwareImage in Nautobot from NautobotSoftwareImage object."""
-        if core_supports_softwareversion():
-            adapter.job.logger.info(f"Creating Software Image: {attrs['platform']} - {ids['software_version']}.")
-        else:
-            adapter.job.logger.info(f"Creating Software Image File: {attrs['platform']} - {ids['software']}.")
+        adapter.job.logger.info(f"Creating Software Image: {attrs['platform']} - {ids['software_version']}.")
         _tags = []
         _device_types = []
         if attrs["device_types"] is not None:
             for dt in attrs["device_types"]:
                 _device_types.append(ORMDeviceType.objects.get(model=dt))
-        if core_supports_softwareversion():
-            _status = ORMStatus.objects.get(name=attrs.get(attrs["status"], "Active"))
-        else:
-            _status = ORMStatus.objects.get(name="Active")
+        _status = ORMStatus.objects.get(name=attrs.get(attrs["status"], "Active"))
         if attrs["tags"] is not None:
             for tag in attrs["tags"]:
                 _tags.append(ORMTag.objects.get(name=tag))
         _platform = ORMPlatform.objects.get(name=attrs["platform"])
-        if core_supports_softwareversion():
-            if adapter.job.debug:
-                adapter.job.logger.debug(f"Getting Software: {ids['software_version']}.")
-            _software = ORMSoftware.objects.get(version=ids["software_version"].split(" - ")[1], platform=_platform)
-        else:
-            if adapter.job.debug:
-                adapter.job.logger.debug(f"Getting Software: {attrs['software_version']} - {attrs['platform']}.")
-            _software = ORMSoftware.objects.get(version=attrs["software_version"], device_platform=_platform)
-        if core_supports_softwareversion():
-            _new_soft_image = ORMSoftwareImage(
-                software_version=_software,
-                status=_status,
-                image_file_size=attrs["file_size"],
-                image_file_name=ids["image_file_name"],
-                image_file_checksum=attrs["image_file_checksum"],
-                hashing_algorithm=attrs["hashing_algorithm"],
-                download_url=attrs["download_url"],
-                default_image=attrs["default_image"],
-            )
-        else:
-            _new_soft_image = ORMSoftwareImage(
-                software=_software,
-                image_file_name=attrs["file_name"],
-                image_file_checksum=attrs["image_file_checksum"],
-                hashing_algorithm=attrs["hashing_algorithm"],
-                download_url=attrs["download_url"],
-                default_image=attrs["default_image"],
-            )
+        if adapter.job.debug:
+            adapter.job.logger.debug(f"Getting Software: {ids['software_version']}.")
+        _software = ORMSoftware.objects.get(version=ids["software_version"].split(" - ")[1], platform=_platform)
+        _new_soft_image = ORMSoftwareImage(
+            software_version=_software,
+            status=_status,
+            image_file_size=attrs["file_size"],
+            image_file_name=ids["image_file_name"],
+            image_file_checksum=attrs["image_file_checksum"],
+            hashing_algorithm=attrs["hashing_algorithm"],
+            download_url=attrs["download_url"],
+            default_image=attrs["default_image"],
+        )
         if attrs.get("tags"):
             _new_soft_image.validated_save()
             _new_soft_image.tags.clear()
             for tag in attrs["tags"]:
                 _new_soft_image.tags.add(ORMTag.objects.get(name=tag))
-        if attrs.get("device_types") and core_supports_softwareversion():
+        if attrs.get("device_types"):
             _new_soft_image.device_types.set(_device_types)
         _new_soft_image.custom_field_data.update({"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")})
         _new_soft_image.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _new_soft_image.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=_new_soft_image, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
         """Update SoftwareImage in Nautobot from NautobotSoftwareImage object."""
-        if core_supports_softwareversion():
-            self.adapter.job.logger.info(f"Updating Software Image: {self.software_version}.")
-        else:
-            self.adapter.job.logger.info(f"Updating Software Image File: {self.platform} - {self.software}.")
+        self.adapter.job.logger.info(f"Updating Software Image: {self.software_version}.")
         _platform = ORMPlatform.objects.get(name=self.platform)
-        if core_supports_softwareversion():
-            _software = ORMSoftware.objects.get(version=self.software_version.split(" - ")[1], platform=_platform)
-        else:
-            _software = ORMSoftware.objects.get(version=self.software_version, device_platform=_platform)
-        if core_supports_softwareversion():
-            _update_soft_image = ORMSoftwareImage.objects.get(software_version=_software)
-        else:
-            _update_soft_image = ORMSoftwareImage.objects.get(software=_software)
+        _software = ORMSoftware.objects.get(version=self.software_version.split(" - ")[1], platform=_platform)
+        _update_soft_image = ORMSoftwareImage.objects.get(software_version=_software)
         if attrs.get("platform"):
             _update_soft_image.platform = _platform
         if "status" in attrs:
@@ -2659,13 +2818,17 @@ class NautobotSoftwareImage(_SoftwareImage_Base_Class):
             )
         _update_soft_image.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
         _update_soft_image.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_soft_image, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
         return super().update(attrs)
 
     def delete(self):
         """Delete SoftwareImage in Nautobot from NautobotSoftwareImage object."""
         try:
             _platform = ORMPlatform.objects.get(name=self.platform)
-            _software = ORMSoftware.objects.get(version=self.software_version, device_platform=_platform)
+            _software = ORMSoftware.objects.get(version=self.software_version, platform=_platform)
             _soft_image = ORMSoftwareImage.objects.get(software=_software)
             super().delete()
             _soft_image.delete()
@@ -2691,10 +2854,7 @@ if validate_dlm_installed():
             _object_tags = []  # noqa: F841
             try:
                 _platform = ORMPlatform.objects.get(name=attrs["platform"])
-                if dlm_supports_softwarelcm():
-                    _software = ORMSoftware.objects.get(version=attrs["software_version"], device_platform=_platform)
-                if core_supports_softwareversion():
-                    _software = ORMSoftware.objects.get(version=attrs["software_version"], platform=_platform)
+                _software = ORMSoftware.objects.get(version=attrs["software_version"], platform=_platform)
             except ORMPlatform.DoesNotExist:
                 adapter.job.logger.warning(
                     f"Platform ({attrs['platform']}) not found, unable to create Validated Software."
@@ -2749,6 +2909,10 @@ if validate_dlm_installed():
                     for _tag in attrs["tags"]:
                         _new_validated_software.tags.add(ORMTag.objects.get(name=_tag))
             _new_validated_software.validated_save()
+            metadata = add_or_update_metadata_on_object(
+                adapter=adapter, obj=_new_validated_software, scoped_fields=SCOPED_FIELDS_MAPPING
+            )
+            metadata.validated_save()
             return super().create(adapter=adapter, ids=ids, attrs=attrs)
 
         def update(self, attrs):
@@ -2763,10 +2927,7 @@ if validate_dlm_installed():
             _object_tags = []  # noqa: F841
             try:
                 _platform = ORMPlatform.objects.get(name=self.platform)
-                if dlm_supports_softwarelcm():
-                    _software = ORMSoftware.objects.get(version=self.software_version, device_platform=_platform)
-                if core_supports_softwareversion():
-                    _software = ORMSoftware.objects.get(version=self.software_version, platform=_platform)
+                _software = ORMSoftware.objects.get(version=self.software_version, platform=_platform)
             except ORMPlatform.DoesNotExist:
                 self.adapter.job.logger.warning(
                     f"Platform ({attrs['platform']}) not found, unable to create Validated Software."
@@ -2831,6 +2992,10 @@ if validate_dlm_installed():
                 {"last_synced_from_sor": datetime.today().date().isoformat()}
             )
             _update_validated_software.validated_save()
+            metadata = add_or_update_metadata_on_object(
+                adapter=self.adapter, obj=_update_validated_software, scoped_fields=SCOPED_FIELDS_MAPPING
+            )
+            metadata.validated_save()
             return super().update(attrs)
 
         def delete(self):
@@ -2842,3 +3007,101 @@ if validate_dlm_installed():
                 return self
             except ORMValidatedSoftware.DoesNotExist as err:
                 self.adapter.job.logger.warning(f"Unable to find ValidatedSoftware {self} for deletion. {err}")
+
+
+class NautobotExternalIntegration(ExternalIntegration):
+    """Nautobot implementation of Bootstrap ExternalIntegration model."""
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """Create ExternalIntegration in Nautobot from NautobotExternalIntegration object."""
+        adapter.job.logger.info(f"Creating Nautobot External Integration: {ids['name']}")
+        _secrets_group = None
+        if attrs.get("secrets_group"):
+            _secrets_group = ORMSecretsGroup.objects.get(name=attrs["secrets_group"])
+        _tags = []
+        for tag in attrs["tags"]:
+            _tags.append(ORMTag.objects.get(name=tag))
+        new_externalintegration = ORMExternalIntegration(
+            name=ids["name"],
+            remote_url=attrs["remote_url"],
+            timeout=attrs["timeout"],
+            verify_ssl=attrs["verify_ssl"],
+            secrets_group=_secrets_group,
+            headers=attrs["headers"],
+            http_method=attrs["http_method"],
+            ca_file_path=attrs["ca_file_path"],
+            extra_config=attrs["extra_config"],
+            tags=_tags,
+        )
+        new_externalintegration.custom_field_data.update(
+            {"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")}
+        )
+        new_externalintegration.custom_field_data.update({"last_synced_from_sor": datetime.today().date().isoformat()})
+        new_externalintegration.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=adapter, obj=new_externalintegration, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
+        return super().create(adapter=adapter, ids=ids, attrs=attrs)
+
+    def update(self, attrs):
+        """Update ExternalIntegration in Nautobot from NautobotExternalIntegration object."""
+        self.adapter.job.logger.info(f"Updating ExternalIntegration {self.name}")
+        _update_externalintegration = ORMExternalIntegration.objects.get(id=self.uuid)
+        if attrs.get("remote_url"):
+            _update_externalintegration.remote_url = attrs["remote_url"]
+        if attrs.get("timeout"):
+            _update_externalintegration.timeout = attrs["timeout"]
+        if attrs.get("verify_ssl"):
+            _update_externalintegration.verify_ssl = attrs["verify_ssl"]
+        if attrs.get("secrets_group"):
+            _secrets_group = ORMSecretsGroup.objects.get(name=attrs["secrets_group"])
+            _update_externalintegration.secrets_group = _secrets_group
+        if attrs.get("headers"):
+            _update_externalintegration.headers = attrs["headers"]
+        if attrs.get("http_method"):
+            _update_externalintegration.http_method = attrs["http_method"]
+        if attrs.get("ca_file_path"):
+            _update_externalintegration.ca_file_path = attrs["ca_file_path"]
+        if attrs.get("extra_config"):
+            _update_externalintegration.extra_config = attrs["extra_config"]
+        if "tags" in attrs:
+            try:
+                _tags = []
+                for tag in attrs["tags"]:
+                    _tags.append(ORMTag.objects.get(name=tag))
+            except ORMTag.DoesNotExist:
+                self.adapter.job.logger.warning(
+                    f"Nautobot Tag {attrs['tags']} does not exist. Make sure it is created manually or defined in global_settings.yaml"
+                )
+        if attrs.get("tags"):
+            _update_externalintegration.validated_save()
+            # TODO: Probably a better way to handle this that's easier on the database.
+            _update_externalintegration.tags.clear()
+            for _tag in attrs["tags"]:
+                _update_externalintegration.tags.add(ORMTag.objects.get(name=_tag))
+        if not check_sor_field(_update_externalintegration):
+            _update_externalintegration.custom_field_data.update(
+                {"system_of_record": os.getenv("SYSTEM_OF_RECORD", "Bootstrap")}
+            )
+        _update_externalintegration.custom_field_data.update(
+            {"last_synced_from_sor": datetime.today().date().isoformat()}
+        )
+        _update_externalintegration.validated_save()
+        metadata = add_or_update_metadata_on_object(
+            adapter=self.adapter, obj=_update_externalintegration, scoped_fields=SCOPED_FIELDS_MAPPING
+        )
+        metadata.validated_save()
+        return super().update(attrs)
+
+    def delete(self):
+        """Delete ExternalIntegration in Nautobot from NautobotExternalIntegration object."""
+        self.adapter.job.logger.debug(f"Delete ExternalIntegration uuid: {self.uuid}")
+        try:
+            git_repo = ORMExternalIntegration.objects.get(id=self.uuid)
+            super().delete()
+            git_repo.delete()
+            return self
+        except ORMExternalIntegration.DoesNotExist as err:
+            self.adapter.job.logger.warning(f"Unable to find ExternalIntegration {self.uuid} for deletion. {err}")

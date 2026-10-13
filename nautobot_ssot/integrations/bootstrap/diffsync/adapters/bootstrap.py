@@ -12,7 +12,7 @@ from nautobot.extras.choices import CustomFieldFilterLogicChoices, JobExecutionT
 from nautobot.extras.datasources.git import ensure_git_repository
 from nautobot.extras.models import GitRepository
 
-from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (
+from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (  # noqa: F401
     BootstrapCircuit,
     BootstrapCircuitTermination,
     BootstrapCircuitType,
@@ -20,6 +20,7 @@ from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (
     BootstrapContact,
     BootstrapCustomField,
     BootstrapDynamicGroup,
+    BootstrapExternalIntegration,
     BootstrapGitRepository,
     BootstrapGraphQLQuery,
     BootstrapLocation,
@@ -35,6 +36,8 @@ from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (
     BootstrapScheduledJob,
     BootstrapSecret,
     BootstrapSecretsGroup,
+    BootstrapSoftware,
+    BootstrapSoftwareImage,
     BootstrapTag,
     BootstrapTeam,
     BootstrapTenant,
@@ -51,26 +54,12 @@ from nautobot_ssot.integrations.bootstrap.utils import (
     validate_software_image_status,
     validate_software_version_status,
 )
-from nautobot_ssot.utils import core_supports_softwareversion, dlm_supports_softwarelcm, validate_dlm_installed
+from nautobot_ssot.utils import validate_dlm_installed
 
-if core_supports_softwareversion():
-    from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (  # noqa: F401
-        BootstrapSoftware,
-        BootstrapSoftwareImage,
-    )
-
-    if validate_dlm_installed():
-        import nautobot_device_lifecycle_mgmt  # noqa: F401
-
-        from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (  # noqa: F401
-            BootstrapValidatedSoftware,
-        )
-elif dlm_supports_softwarelcm():
+if validate_dlm_installed():
     import nautobot_device_lifecycle_mgmt  # noqa: F401
 
     from nautobot_ssot.integrations.bootstrap.diffsync.models.bootstrap import (  # noqa: F401
-        BootstrapSoftware,
-        BootstrapSoftwareImage,
         BootstrapValidatedSoftware,
     )
 
@@ -109,14 +98,9 @@ class LabelMixin:
             "graph_ql_query",
         ]
 
-        if core_supports_softwareversion():
-            _model_list.append("software_version")
-            _model_list.append("software_image_file")
-            if validate_dlm_installed():
-                _model_list.append("validated_software")
-        elif dlm_supports_softwarelcm():
-            _model_list.append("software")
-            _model_list.append("software_image")
+        _model_list.append("software_version")
+        _model_list.append("software_image_file")
+        if validate_dlm_installed():
             _model_list.append("validated_software")
 
         for modelname in _model_list:
@@ -174,15 +158,11 @@ class BootstrapAdapter(Adapter, LabelMixin):
     custom_field = BootstrapCustomField
     tag = BootstrapTag
     graph_ql_query = BootstrapGraphQLQuery
+    external_integration = BootstrapExternalIntegration
 
-    if core_supports_softwareversion():
-        software_version = BootstrapSoftware
-        software_image_file = BootstrapSoftwareImage
-        if validate_dlm_installed():
-            validated_software = BootstrapValidatedSoftware
-    elif dlm_supports_softwarelcm():
-        software = BootstrapSoftware
-        software_image = BootstrapSoftwareImage
+    software_version = BootstrapSoftware
+    software_image_file = BootstrapSoftwareImage
+    if validate_dlm_installed():
         validated_software = BootstrapValidatedSoftware
 
     top_level = [
@@ -214,16 +194,11 @@ class BootstrapAdapter(Adapter, LabelMixin):
         "custom_field",
         "tag",
         "graph_ql_query",
+        "external_integration",
+        "software_version",
+        "software_image_file",
     ]
-
-    if core_supports_softwareversion():
-        top_level.append("software_version")
-        top_level.append("software_image_file")
-        if validate_dlm_installed():
-            top_level.append("validated_software")
-    elif dlm_supports_softwarelcm():
-        top_level.append("software")
-        top_level.append("software_image")
+    if validate_dlm_installed():
         top_level.append("validated_software")
 
     def __init__(self, *args, job=None, sync=None, client=None, **kwargs):  # noqa: D417
@@ -239,11 +214,57 @@ class BootstrapAdapter(Adapter, LabelMixin):
         self.sync = sync
         self.conn = client
 
-    def load_tenant_group(self, bs_tenant_group, branch_vars):
+    def load_branch_values(self, item_type, original_item, keys=None):
+        """Load any extra values from branch override files, supporting single or list keys."""
+        if not keys:
+            keys = ["name"]
+        elif not isinstance(keys, list):
+            keys = [keys]
+
+        def check_all_keys_match(branch_item, original_item, keys):
+            """Returns True if all values defined by lookup_key match between the two items."""
+            for k in keys:
+                original_value = original_item.get(k)
+                branch_value = branch_item.get(k)
+
+                # Not a match
+                if branch_value is None or branch_value != original_value:
+                    return False
+
+            # Match, same object
+            return True
+
+        if branch_items := self.branch_vars.get(item_type):
+            for branch_item in branch_items:
+                if branch_item.get("name") == "default":
+                    continue
+
+                if check_all_keys_match(branch_item, original_item, keys):
+                    if self.job.debug:
+                        self.job.logger.debug(f"Loading branch values to {original_item}, values: {branch_item}")
+
+                    original_item = original_item | branch_item  # branch/specific value always 'wins'
+                    break
+
+            default_values = [obj for obj in branch_items if obj.get("name") == "default"]
+            if default_values:
+                default_values_filtered = {
+                    k: v for k, v in default_values[0].items() if k not in keys
+                }  # don't override name/keys to 'default'
+                if self.job.debug:
+                    self.job.logger.debug(
+                        f"Loading only missing default values to {original_item}, possible values: {default_values_filtered}"
+                    )
+                original_item = default_values_filtered | original_item  # original value always 'wins'
+
+        return original_item
+
+    def load_tenant_group(self, bs_tenant_group):
         """Load TenantGroup objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap TenantGroup: {bs_tenant_group}")
 
+        bs_tenant_group = self.load_branch_values(item_type="tenant_group", original_item=bs_tenant_group)
         try:
             self.get(self.tenant_group, bs_tenant_group["name"])
         except ObjectNotFound:
@@ -255,11 +276,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_tenant_group)
 
-    def load_tenant(self, bs_tenant, branch_vars):
+    def load_tenant(self, bs_tenant):
         """Load Tenant objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Tenant: {bs_tenant}")
 
+        bs_tenant = self.load_branch_values(item_type="tenant", original_item=bs_tenant)
         try:
             self.get(self.tenant, bs_tenant["name"])
         except ObjectNotFound:
@@ -272,11 +294,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_tenant)
 
-    def load_role(self, bs_role, branch_vars):
+    def load_role(self, bs_role):
         """Load Role objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Role {bs_role}")
 
+        bs_role = self.load_branch_values(item_type="role", original_item=bs_role)
         if len(bs_role["content_types"]) > 1:
             _content_types = bs_role["content_types"]
             _content_types.sort()
@@ -295,11 +318,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_role)
 
-    def load_manufacturer(self, bs_manufacturer, branch_vars):
+    def load_manufacturer(self, bs_manufacturer):
         """Load Manufacturer objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Boostrap Manufacturer {bs_manufacturer}")
 
+        bs_manufacturer = self.load_branch_values(item_type="manufacturer", original_item=bs_manufacturer)
         try:
             self.get(self.manufacturer, bs_manufacturer["name"])
         except ObjectNotFound:
@@ -310,11 +334,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_manufacturer)
 
-    def load_platform(self, bs_platform, branch_vars):
+    def load_platform(self, bs_platform):
         """Load Platform objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Platform {bs_platform}")
 
+        bs_platform = self.load_branch_values(item_type="platform", original_item=bs_platform)
         try:
             self.get(self.platform, bs_platform["name"])
         except ObjectNotFound:
@@ -329,16 +354,17 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_platform)
 
-    def load_location_type(self, bs_location_type, branch_vars):
+    def load_location_type(self, bs_location_type):
         """Load LocationType objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap LocationType {bs_location_type}")
 
+        bs_location_type = self.load_branch_values(item_type="location_type", original_item=bs_location_type)
         try:
             self.get(self.location_type, bs_location_type["name"])
         except ObjectNotFound:
             _content_types = []
-            if bs_location_type["parent"]:
+            if bs_location_type.get("parent"):
                 _parent = bs_location_type["parent"]
             else:
                 _parent = None
@@ -355,15 +381,16 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_location_type)
 
-    def load_location(self, bs_location, branch_vars):
+    def load_location(self, bs_location):
         """Load Location objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Location {bs_location}")
 
+        bs_location = self.load_branch_values(item_type="location", original_item=bs_location)
         try:
             self.get(self.location, bs_location["name"])
         except ObjectNotFound:
-            if bs_location["parent"]:
+            if bs_location.get("parent"):
                 _parent = bs_location["parent"]
             else:
                 _parent = None
@@ -393,11 +420,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_location)
 
-    def load_team(self, bs_team, branch_vars):
+    def load_team(self, bs_team):
         """Load Team objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Team {bs_team}")
 
+        bs_team = self.load_branch_values(item_type="team", original_item=bs_team)
         if "contacts" in bs_team:
             _contacts = []
             for _contact in bs_team["contacts"]:
@@ -417,11 +445,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_team)
 
-    def load_contact(self, bs_contact, branch_vars):
+    def load_contact(self, bs_contact):
         """Load Contact objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Boostrap Contact {bs_contact}")
 
+        bs_contact = self.load_branch_values(item_type="contact", original_item=bs_contact)
         if "teams" in bs_contact:
             _teams = []
             for _team in bs_contact["teams"]:
@@ -440,11 +469,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_contact)
 
-    def load_provider(self, bs_provider, branch_vars):
+    def load_provider(self, bs_provider):
         """Load Provider objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Provider {bs_provider}")
 
+        bs_provider = self.load_branch_values(item_type="provider", original_item=bs_provider)
         try:
             self.get(self.provider, bs_provider["name"])
         except ObjectNotFound:
@@ -460,11 +490,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_provider)
 
-    def load_provider_network(self, bs_provider_network, branch_vars):
+    def load_provider_network(self, bs_provider_network):
         """Load ProviderNetwork objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap ProviderNetwork {bs_provider_network}")
 
+        bs_provider_network = self.load_branch_values(item_type="provider_network", original_item=bs_provider_network)
         try:
             self.get(self.provider_network, bs_provider_network["name"])
         except ObjectNotFound:
@@ -478,11 +509,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_provider_network)
 
-    def load_circuit_type(self, bs_circuit_type, branch_vars):
+    def load_circuit_type(self, bs_circuit_type):
         """Load CircuitType objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap CircuitType {bs_circuit_type} into DiffSync models.")
 
+        bs_circuit_type = self.load_branch_values(item_type="circuit_type", original_item=bs_circuit_type)
         try:
             self.get(self.circuit_type, bs_circuit_type["name"])
         except ObjectNotFound:
@@ -493,11 +525,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_circuit_type)
 
-    def load_circuit(self, bs_circuit, branch_vars):
+    def load_circuit(self, bs_circuit):
         """Load Circuit objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Circuit {bs_circuit} into DiffSync models.")
 
+        bs_circuit = self.load_branch_values(item_type="circuit", original_item=bs_circuit, keys="circuit_id")
         try:
             self.get(self.circuit, bs_circuit["circuit_id"])
         except ObjectNotFound:
@@ -514,12 +547,15 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_circuit)
 
-    def load_circuit_termination(self, bs_circuit_termination, branch_vars):
+    def load_circuit_termination(self, bs_circuit_termination):
         """Load CircuitTermination objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(
                 f"Loading Bootstrap CircuitTermination {bs_circuit_termination} into DiffSync models."
             )
+        bs_circuit_termination = self.load_branch_values(
+            item_type="circuit_termination", original_item=bs_circuit_termination
+        )
         _parts = bs_circuit_termination["name"].split("__")
         _circuit_id = _parts[0]
         _provider = _parts[1]
@@ -555,10 +591,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             except ObjectNotFound as err:
                 self.job.logger.warning(f"Circuit {_circuit_id} not found. {err}")
 
-    def load_namespace(self, bs_namespace, branch_vars):
+    def load_namespace(self, bs_namespace):
         """Load Namespace objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Namespace {bs_namespace}.")
+
+        bs_namespace = self.load_branch_values(item_type="namespace", original_item=bs_namespace)
         try:
             self.get(self.namespace, bs_namespace["name"])
         except ObjectNotFound:
@@ -570,10 +608,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_namespace)
 
-    def load_rir(self, bs_rir, branch_vars):
+    def load_rir(self, bs_rir):
         """Load RiR objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap RiR {bs_rir}.")
+
+        bs_rir = self.load_branch_values(item_type="rir", original_item=bs_rir)
         try:
             self.get(self.rir, bs_rir["name"])
         except ObjectNotFound:
@@ -585,10 +625,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_rir)
 
-    def load_vlan_group(self, bs_vlan_group, branch_vars):
+    def load_vlan_group(self, bs_vlan_group):
         """Load VLANGroup objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap VLANGroup {bs_vlan_group}.")
+
+        bs_vlan_group = self.load_branch_values(item_type="vlan_group", original_item=bs_vlan_group)
         try:
             self.get(self.vlan_group, bs_vlan_group["name"])
         except ObjectNotFound:
@@ -600,10 +642,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_vlan_group)
 
-    def load_vlan(self, bs_vlan, branch_vars):
+    def load_vlan(self, bs_vlan):
         """Load VLAN objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap VLAN {bs_vlan}.")
+
+        bs_vlan = self.load_branch_values(item_type="vlan", original_item=bs_vlan, keys=["name", "vlan_group"])
         try:
             self.get(
                 self.vlan,
@@ -628,10 +672,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_vlan)
 
-    def load_vrf(self, bs_vrf, branch_vars):
+    def load_vrf(self, bs_vrf):
         """Load VRF objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap VRF {bs_vrf}.")
+
+        bs_vrf = self.load_branch_values(item_type="vrf", original_item=bs_vrf)
         try:
             self.get(
                 self.vrf,
@@ -652,10 +698,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_vrf)
 
-    def load_prefix(self, bs_prefix, branch_vars):
+    def load_prefix(self, bs_prefix):
         """Load Prefix objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Prefix {bs_prefix}.")
+
+        bs_prefix = self.load_branch_values(item_type="prefix", original_item=bs_prefix, keys=["network", "namespace"])
         try:
             self.get(
                 self.prefix,
@@ -703,10 +751,12 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_prefix)
 
-    def load_secret(self, bs_secret, branch_vars):
+    def load_secret(self, bs_secret):
         """Load Secret objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Secret: {bs_secret}")
+
+        bs_secret = self.load_branch_values(item_type="secret", original_item=bs_secret)
         if bs_secret["provider"] == "environment-variable":
             params = {"variable": bs_secret["parameters"]["variable"]}
         elif bs_secret["provider"] == "text-file":
@@ -726,11 +776,13 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_secret)
 
-    def load_secrets_group(self, bs_sg, branch_vars):
+    def load_secrets_group(self, bs_sg):
         """Load SecretsGroup objects from Bootstrap into DiffSync models."""
         _secrets = []
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap SecretsGroup: {bs_sg}")
+
+        bs_sg = self.load_branch_values(item_type="secrets_group", original_item=bs_sg)
         try:
             self.get(self.secrets_group, bs_sg["name"])
         except ObjectNotFound:
@@ -744,10 +796,11 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(new_secrets_group)
 
-    def load_git_repository(self, git_repo, branch_vars):
+    def load_git_repository(self, git_repo):
         """Load GitRepository objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap GitRepository: {git_repo}")
+        git_repo = self.load_branch_values(item_type="git_repository", original_item=git_repo)
         try:
             self.get(self.git_repository, git_repo["name"])
         except ObjectNotFound:
@@ -755,14 +808,16 @@ class BootstrapAdapter(Adapter, LabelMixin):
             for con_type in git_repo["provided_data_type"]:
                 _content_type = lookup_content_type(content_model_path="extras.gitrepository", content_type=con_type)
                 _data_types.append(_content_type)
-            if git_repo.get("branch"):
-                _branch = git_repo["branch"]
-            else:
-                _branch = branch_vars["git_branch"]
+
+            if not git_repo.get("branch"):
+                git_repo["branch"] = self.branch_vars.get(
+                    "git_branch"
+                )  # temporary backwards compatibility -- remove in v4
+
             new_git_repository = self.git_repository(
                 name=git_repo["name"],
                 url=git_repo["url"],
-                branch=_branch,
+                branch=git_repo.get("branch"),
                 provided_contents=_data_types,
                 secrets_group=git_repo["secrets_group_name"],
                 system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
@@ -774,6 +829,8 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load DynamicGroup objects from Bootstrap into DiffSync models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap DynamicGroup: {dyn_group}")
+
+        dyn_group = self.load_branch_values(item_type="dynamic_group", original_item=dyn_group)
         try:
             self.get(self.dynamic_group, dyn_group["name"])
         except ObjectNotFound:
@@ -790,6 +847,8 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load ComputedField objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap ComputedField: {comp_field}")
+
+        comp_field = self.load_branch_values(item_type="computed_field", original_item=comp_field, keys=["label"])
         try:
             self.get(self.computed_field, comp_field["label"])
         except ObjectNotFound:
@@ -804,6 +863,8 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load CustomField objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap CustomField: {custom_field}")
+
+        custom_field = self.load_branch_values(item_type="custom_field", original_item=custom_field, keys=["label"])
         for key in ["label", "type", "content_types"]:
             if key not in custom_field:
                 self.job.logger.error(
@@ -838,6 +899,8 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load Tag objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Tag: {tag}")
+
+        tag = self.load_branch_values(item_type="tag", original_item=tag)
         if len(tag["content_types"]) > 1:
             _content_types = tag["content_types"]
             _content_types.sort()
@@ -859,6 +922,8 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load GraphQLQuery objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap GraphQLQuery {query}")
+
+        query = self.load_branch_values(item_type="graph_ql_query", original_item=query)
         try:
             self.get(self.graph_ql_query, query["name"])
         except ObjectNotFound:
@@ -869,6 +934,7 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load ScheduledJob objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap ScheduledJob {scheduled_job}")
+        scheduled_job = self.load_branch_values(item_type="scheduled_job", original_item=scheduled_job)
         try:
             self.get(self.scheduled_job, scheduled_job["name"])
         except ObjectNotFound:
@@ -908,7 +974,6 @@ class BootstrapAdapter(Adapter, LabelMixin):
                 crontab=crontab,
                 job_vars=job_vars,
                 profile=scheduled_job.get("profile", False),
-                approval_required=scheduled_job.get("approval_required", False),
                 task_queue=scheduled_job.get("task_queue"),
                 enabled=scheduled_job.get("enabled", True),
             )
@@ -918,25 +983,22 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load Software objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap Software {software}")
-        # Always map device_platform to platform for consistency
-        platform = software.get("device_platform") or software.get("platform")
+
+        software = self.load_branch_values(item_type="software", original_item=software, keys=["platform", "version"])
+        if not software.get("version") or not software.get("platform"):
+            self.job.logger.warning(
+                f"Software: {software} is not formatted correctly in the yaml file. Version and platform are required."
+            )
+            return
+
         try:
-            if core_supports_softwareversion():
-                self.get(
-                    self.software_version,
-                    {
-                        "version": software["version"],
-                        "platform": platform,
-                    },
-                )
-            else:
-                self.get(
-                    self.software,
-                    {
-                        "version": software["version"],
-                        "platform": platform,
-                    },
-                )
+            self.get(
+                self.software_version,
+                {
+                    "version": software["version"],
+                    "platform": software.get("platform"),
+                },
+            )
         except ObjectNotFound:
             try:
                 _release_date = datetime.datetime.strptime(software["release_date"], "%Y-%m-%d")
@@ -946,46 +1008,30 @@ class BootstrapAdapter(Adapter, LabelMixin):
                 _eos_date = datetime.datetime.strptime(software["eos_date"], "%Y-%m-%d")
             except (TypeError, KeyError):
                 _eos_date = None
-
             _documentation_url = software.get("documentation_url", "")
             _alias = software.get("alias", "")
             _lts = software.get("lts", False)
             _pre_release = software.get("pre_release", False)
             _tags = software.get("tags", [])
 
-            if core_supports_softwareversion():
-                _status = validate_software_version_status(
-                    software.get("status", "Active"), software["version"], self.job.logger
-                )
+            _status = validate_software_version_status(
+                software.get("status", "Active"), software["version"], self.job.logger
+            )
 
-                _new_software = self.software_version(
-                    version=software["version"],
-                    platform=platform,
-                    status=_status,
-                    alias=_alias,
-                    release_date=_release_date,
-                    eos_date=_eos_date,
-                    documentation_url=_documentation_url,
-                    long_term_support=_lts,
-                    pre_release=_pre_release,
-                    tags=_tags,
-                    system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
-                )
-            else:
-                _new_software = self.software(
-                    version=software["version"],
-                    platform=platform,
-                    alias=_alias,
-                    release_date=_release_date,
-                    eos_date=_eos_date,
-                    documentation_url=_documentation_url,
-                    long_term_support=_lts,
-                    pre_release=_pre_release,
-                    tags=_tags,
-                    system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
-                )
+            _new_software = self.software_version(
+                version=software["version"],
+                platform=software.get("platform"),
+                status=_status,
+                alias=_alias,
+                release_date=_release_date,
+                eos_date=_eos_date,
+                documentation_url=_documentation_url,
+                long_term_support=_lts,
+                pre_release=_pre_release,
+                tags=_tags,
+                system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
+            )
             self.add(_new_software)
-            print(f"Added software: {_new_software}")
             if self.job.debug:
                 self.job.logger.debug(f"Loaded Bootstrap Software: {_new_software}")
 
@@ -993,58 +1039,40 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load SoftwareImage objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap SoftwareImage {software_image}")
-        try:
-            if core_supports_softwareversion():
-                self.get(
-                    self.software_image_file,
-                    {
-                        "image_file_name": software_image["file_name"],
-                        "software_version": f"{software_image['platform']} - {software_image['software_version']}",
-                    },
-                )
-            else:
-                self.get(
-                    self.software_image,
-                    {
-                        "software": f"{software_image['platform']} - {software_image['software_version']}",
-                    },
-                )
-        except ObjectNotFound:
-            if core_supports_softwareversion():
-                _status = validate_software_image_status(
-                    software_image["status"], software_image["file_name"], self.job.logger
-                )
-                _hashing_algorithm = validate_hashing_algorithm(
-                    software_image.get("hashing_algorithm"), software_image["file_name"], self.job.logger
-                )
 
-                _new_software_image = self.software_image_file(
-                    platform=software_image["platform"],
-                    software_version=f"{software_image['platform']} - {software_image['software_version']}",
-                    image_file_name=software_image["file_name"],
-                    file_size=software_image["file_size"],
-                    status=_status,
-                    device_types=sorted(software_image["device_types"]),
-                    download_url=software_image["download_url"],
-                    image_file_checksum=software_image["image_file_checksum"],
-                    hashing_algorithm=_hashing_algorithm,
-                    default_image=software_image["default_image"] if not None else False,
-                    tags=software_image["tags"],
-                    system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
-                )
-            else:
-                _new_software_image = self.software_image(
-                    software=f'{software_image["platform"]} - {software_image["software_version"]}',
-                    platform=software_image["platform"],
-                    software_version=software_image["software_version"],
-                    file_name=software_image["file_name"],
-                    download_url=software_image["download_url"],
-                    image_file_checksum=software_image["image_file_checksum"],
-                    hashing_algorithm=software_image["hashing_algorithm"],
-                    default_image=software_image["default_image"] if not None else False,
-                    tags=software_image["tags"],
-                    system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
-                )
+        software_image = self.load_branch_values(
+            item_type="software_image", original_item=software_image, keys=["software"]
+        )
+        try:
+            self.get(
+                self.software_image_file,
+                {
+                    "image_file_name": software_image["file_name"],
+                    "software_version": f"{software_image['platform']} - {software_image['software_version']}",
+                },
+            )
+        except ObjectNotFound:
+            _status = validate_software_image_status(
+                software_image["status"], software_image["file_name"], self.job.logger
+            )
+            _hashing_algorithm = validate_hashing_algorithm(
+                software_image.get("hashing_algorithm"), software_image["file_name"], self.job.logger
+            )
+
+            _new_software_image = self.software_image_file(
+                platform=software_image["platform"],
+                software_version=f"{software_image['platform']} - {software_image['software_version']}",
+                image_file_name=software_image["file_name"],
+                file_size=software_image["file_size"],
+                status=_status,
+                device_types=sorted(software_image["device_types"]),
+                download_url=software_image["download_url"],
+                image_file_checksum=software_image["image_file_checksum"],
+                hashing_algorithm=_hashing_algorithm,
+                default_image=software_image["default_image"] if not None else False,
+                tags=software_image["tags"],
+                system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
+            )
             self.add(_new_software_image)
             if self.job.debug:
                 self.job.logger.debug(f"Loaded Bootstrap SoftwareImage: {_new_software_image}")
@@ -1053,6 +1081,10 @@ class BootstrapAdapter(Adapter, LabelMixin):
         """Load ValidatedSoftware objects from Bootstrap into DiffSync Models."""
         if self.job.debug:
             self.job.logger.debug(f"Loading Bootstrap ValidatedSoftware {validated_software}")
+
+        validated_software = self.load_branch_values(
+            item_type="validated_software", original_item=validated_software, keys=["software"]
+        )
         try:
             self.get(
                 self.validated_software,
@@ -1080,6 +1112,40 @@ class BootstrapAdapter(Adapter, LabelMixin):
             )
             self.add(_new_validated_software)
 
+    def load_external_integration(self, ext_int):
+        """Load ExternalIntegration objects from Bootstrap into DiffSync models."""
+        if self.job.debug:
+            self.job.logger.debug(f"Loading Bootstrap ExternalIntegration: {ext_int}")
+
+        ext_int = self.load_branch_values(item_type="external_integration", original_item=ext_int)
+        try:
+            self.get(self.external_integration, ext_int["name"])
+        except ObjectNotFound:
+            new_external_integration = self.external_integration(
+                name=ext_int["name"],
+                remote_url=ext_int["remote_url"],
+                timeout=ext_int["timeout"],
+                verify_ssl=ext_int.get("verify_ssl", True),
+                secrets_group=ext_int.get("secrets_group", None),
+                headers=ext_int.get("headers", {}),
+                http_method=ext_int.get("http_method", ""),
+                ca_file_path=ext_int.get("ca_file_path", ""),
+                extra_config=ext_int.get("extra_config", {}),
+                tags=ext_int.get("tags", []),
+                system_of_record=os.getenv("SYSTEM_OF_RECORD", "Bootstrap"),
+            )
+            self.add(new_external_integration)
+
+    def load_model(self, global_settings: dict, model_name: str):
+        """Load model by model name."""
+        if not global_settings.get(model_name):
+            self.job.logger.warning(f"`{model_name}` not found in global_settings. Check if the key exists.")
+            return
+        method_name = f"load_{model_name}"
+        for bs_entry in global_settings[model_name]:
+            # TODO: Add debug message here instead of individual `load_` methods (DRY)
+            getattr(self, method_name)(bs_entry)
+
     def load(self):
         """Load data from Bootstrap into DiffSync models."""
         environment_label = settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_nautobot_environment_branch"]
@@ -1105,6 +1171,7 @@ class BootstrapAdapter(Adapter, LabelMixin):
                     globals()[variable_name] = yaml_data
 
             branch_vars = globals()[environment_label]
+            self.branch_vars = branch_vars
             global_settings = globals().get("global_settings")
 
         elif load_type == "git":
@@ -1133,260 +1200,16 @@ class BootstrapAdapter(Adapter, LabelMixin):
                         globals()[variable_name] = yaml_data
 
                 branch_vars = globals()[environment_label]
+                self.branch_vars = branch_vars
                 global_settings = globals().get("global_settings")
 
         # Ensure global_settings is loaded
         if global_settings is None:
             self.job.logger.error("global_settings not loaded. Check if the file exists in the correct directory.")
             return
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["tenant_group"]:
-            if not global_settings.get("tenant_group"):  # noqa: F821
-                self.job.logger.warning("tenant_group not found in global_settings. Check if the key exists.")
-            elif global_settings["tenant_group"] is not None:  # noqa: F821
-                for bs_tenant_group in global_settings["tenant_group"]:  # noqa: F821
-                    self.load_tenant_group(bs_tenant_group=bs_tenant_group, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["tenant"]:
-            if not global_settings.get("tenant"):  # noqa: F821
-                self.job.logger.warning("tenant not found in global_settings. Check if the key exists.")
-            elif global_settings["tenant"] is not None:  # noqa: F821
-                for bs_tenant in global_settings["tenant"]:  # noqa: F821
-                    self.load_tenant(bs_tenant=bs_tenant, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["role"]:
-            if not global_settings.get("role"):  # noqa: F821
-                self.job.logger.warning("role not found in global_settings. Check if the key exists.")
-            elif global_settings["role"] is not None:  # noqa: F821
-                for bs_role in global_settings["role"]:  # noqa: F821
-                    self.load_role(bs_role=bs_role, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["manufacturer"]:
-            if not global_settings.get("manufacturer"):  # noqa: F821
-                self.job.logger.warning("manufacturer not found in global_settings. Check if the key exists.")
-            elif global_settings["manufacturer"] is not None:  # noqa: F821
-                for bs_manufacturer in global_settings["manufacturer"]:  # noqa: F821
-                    self.load_manufacturer(bs_manufacturer=bs_manufacturer, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["platform"]:
-            if not global_settings.get("platform"):  # noqa: F821
-                self.job.logger.warning("platform not found in global_settings. Check if the key exists.")
-            elif global_settings["platform"] is not None:  # noqa: F821
-                for bs_platform in global_settings["platform"]:  # noqa: F821
-                    self.load_platform(bs_platform=bs_platform, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["location_type"]:
-            if not global_settings.get("location_type"):  # noqa: F821
-                self.job.logger.warning("location_type not found in global_settings. Check if the key exists.")
-            elif global_settings["location_type"] is not None:  # noqa: F821
-                for bs_location_type in global_settings["location_type"]:  # noqa: F821
-                    self.load_location_type(bs_location_type=bs_location_type, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["location"]:
-            if not global_settings.get("location"):  # noqa: F821
-                self.job.logger.warning("location not found in global_settings. Check if the key exists.")
-            elif global_settings["location"] is not None:  # noqa: F821
-                for bs_location in global_settings["location"]:  # noqa: F821
-                    self.load_location(bs_location=bs_location, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["team"]:
-            if not global_settings.get("team"):  # noqa: F821
-                self.job.logger.warning("team not found in global_settings. Check if the key exists.")
-            elif global_settings["team"] is not None:  # noqa: F821
-                for bs_team in global_settings["team"]:  # noqa: F821
-                    self.load_team(bs_team=bs_team, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["contact"]:
-            if not global_settings.get("contact"):  # noqa: F821
-                self.job.logger.warning("contact not found in global_settings. Check if the key exists.")
-            elif global_settings["contact"] is not None:  # noqa: F821
-                for bs_contact in global_settings["contact"]:  # noqa: F821
-                    self.load_contact(bs_contact=bs_contact, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["provider"]:
-            if not global_settings.get("provider"):  # noqa: F821
-                self.job.logger.warning("provider not found in global_settings. Check if the key exists.")
-            elif global_settings["provider"] is not None:  # noqa: F821
-                for bs_provider in global_settings["provider"]:  # noqa: F821
-                    self.load_provider(bs_provider=bs_provider, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["provider_network"]:
-            if not global_settings.get("provider_network"):  # noqa: F821
-                self.job.logger.warning("provider_network not found in global_settings. Check if the key exists.")
-            elif global_settings["provider_network"] is not None:  # noqa: F821
-                for bs_provider_network in global_settings["provider_network"]:  # noqa: F821
-                    self.load_provider_network(bs_provider_network=bs_provider_network, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["circuit_type"]:
-            if not global_settings.get("circuit_type"):  # noqa: F821
-                self.job.logger.warning("circuit_type not found in global_settings. Check if the key exists.")
-            elif global_settings["circuit_type"] is not None:  # noqa: F821
-                for bs_circuit_type in global_settings["circuit_type"]:  # noqa: F821
-                    self.load_circuit_type(bs_circuit_type=bs_circuit_type, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["circuit"]:
-            if not global_settings.get("circuit"):  # noqa: F821
-                self.job.logger.warning("circuit not found in global_settings. Check if the key exists.")
-            elif global_settings["circuit"] is not None:  # noqa: F821
-                for bs_circuit in global_settings["circuit"]:  # noqa: F821
-                    self.load_circuit(bs_circuit=bs_circuit, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["circuit_termination"]:
-            if not global_settings.get("circuit_termination"):  # noqa: F821
-                self.job.logger.warning("circuit_termination not found in global_settings. Check if the key exists.")
-            elif global_settings["circuit_termination"] is not None:  # noqa: F821
-                for bs_circuit_termination in global_settings["circuit_termination"]:  # noqa: F821
-                    self.load_circuit_termination(
-                        bs_circuit_termination=bs_circuit_termination,
-                        branch_vars=branch_vars,
-                    )
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["namespace"]:
-            if not global_settings.get("namespace"):  # noqa: F821
-                self.job.logger.warning("namespace not found in global_settings. Check if the key exists.")
-            elif global_settings["namespace"] is not None:  # noqa: F821
-                for bs_namespace in global_settings["namespace"]:  # noqa: F821
-                    self.load_namespace(bs_namespace=bs_namespace, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["rir"]:
-            if not global_settings.get("rir"):  # noqa: F821
-                self.job.logger.warning("rir not found in global_settings. Check if the key exists.")
-            elif global_settings["rir"] is not None:  # noqa: F821
-                for bs_rir in global_settings["rir"]:  # noqa: F821
-                    self.load_rir(bs_rir=bs_rir, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["vlan_group"]:
-            if not global_settings.get("vlan_group"):  # noqa: F821
-                self.job.logger.warning("vlan_group not found in global_settings. Check if the key exists.")
-            elif global_settings["vlan_group"] is not None:  # noqa: F821
-                for bs_vlan_group in global_settings["vlan_group"]:  # noqa: F821
-                    self.load_vlan_group(bs_vlan_group=bs_vlan_group, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["vlan"]:
-            if not global_settings.get("vlan"):  # noqa: F821
-                self.job.logger.warning("vlan not found in global_settings. Check if the key exists.")
-            elif global_settings["vlan"] is not None:  # noqa: F821
-                for bs_vlan in global_settings["vlan"]:  # noqa: F821
-                    self.load_vlan(bs_vlan=bs_vlan, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["vrf"]:
-            if not global_settings.get("vrf"):  # noqa: F821
-                self.job.logger.warning("vrf not found in global_settings. Check if the key exists.")
-            elif global_settings["vrf"] is not None:  # noqa: F821
-                for bs_vrf in global_settings["vrf"]:  # noqa: F821
-                    self.load_vrf(bs_vrf=bs_vrf, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["prefix"]:
-            if not global_settings.get("prefix"):  # noqa: F821
-                self.job.logger.warning("prefix not found in global_settings. Check if the key exists.")
-            elif global_settings["prefix"] is not None:  # noqa: F821
-                for bs_prefix in global_settings["prefix"]:  # noqa: F821
-                    self.load_prefix(bs_prefix=bs_prefix, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["secret"]:
-            if not global_settings.get("secret"):  # noqa: F821
-                self.job.logger.warning("secret not found in global_settings. Check if the key exists.")
-            elif global_settings["secret"] is not None:  # noqa: F821
-                for bs_secret in global_settings["secret"]:  # noqa: F821
-                    self.load_secret(bs_secret=bs_secret, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["secrets_group"]:
-            if not global_settings.get("secrets_group"):  # noqa: F821
-                self.job.logger.warning("secrets_group not found in global_settings. Check if the key exists.")
-            elif global_settings["secrets_group"] is not None:  # noqa: F821
-                for bs_sg in global_settings["secrets_group"]:  # noqa: F821
-                    self.load_secrets_group(bs_sg=bs_sg, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["git_repository"]:
-            if not global_settings.get("git_repository"):  # noqa: F821
-                self.job.logger.warning("git_repository not found in global_settings. Check if the key exists.")
-            elif global_settings["git_repository"] is not None:  # noqa: F821
-                for git_repo in global_settings["git_repository"]:  # noqa: F821
-                    self.load_git_repository(git_repo=git_repo, branch_vars=branch_vars)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["dynamic_group"]:
-            if not global_settings.get("dynamic_group"):  # noqa: F821
-                self.job.logger.warning("dynamic_group not found in global_settings. Check if the key exists.")
-            elif global_settings["dynamic_group"] is not None:  # noqa: F821
-                for dyn_group in global_settings["dynamic_group"]:  # noqa: F821
-                    self.load_dynamic_group(dyn_group=dyn_group)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["computed_field"]:
-            if not global_settings.get("computed_field"):  # noqa: F821
-                self.job.logger.warning("computed_field not found in global_settings. Check if the key exists.")
-            elif global_settings["computed_field"] is not None:  # noqa: F821
-                for computed_field in global_settings["computed_field"]:  # noqa: F821
-                    self.load_computed_field(comp_field=computed_field)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["custom_field"]:
-            if not global_settings.get("custom_field"):  # noqa: F821
-                self.job.logger.warning("custom_field not found in global_settings. Check if the key exists.")
-            elif global_settings["custom_field"] is not None:  # noqa: F821
-                for custom_field in global_settings["custom_field"]:  # noqa: F821
-                    self.load_custom_field(custom_field=custom_field)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["tag"]:
-            if not global_settings.get("tag"):  # noqa: F821
-                self.job.logger.warning("tag not found in global_settings. Check if the key exists.")
-            elif global_settings["tag"] is not None:  # noqa: F821
-                for tag in global_settings["tag"]:  # noqa: F821
-                    self.load_tag(tag=tag)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["graph_ql_query"]:
-            if not global_settings.get("graph_ql_query"):  # noqa: F821
-                self.job.logger.warning("graph_ql_query not found in global_settings. Check if the key exists.")
-            elif global_settings["graph_ql_query"] is not None:  # noqa: F821
-                for graph_ql_query in global_settings["graph_ql_query"]:  # noqa: F821
-                    self.load_graph_ql_query(query=graph_ql_query)
-
-        if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["scheduled_job"]:
-            if not global_settings.get("scheduled_job"):  # noqa: F821
-                self.job.logger.warning("scheduled_job not found in global_settings. Check if the key exists.")
-            elif global_settings["scheduled_job"] is not None:  # noqa: F821
-                for job in global_settings["scheduled_job"]:  # noqa: F821
-                    self.load_scheduled_job(scheduled_job=job)
-
-        if core_supports_softwareversion():
-            if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["software"]:
-                if not global_settings.get("software"):  # noqa: F821
-                    self.job.logger.warning("software not found in global_settings. Check if the key exists.")
-                elif global_settings["software"] is not None:  # noqa: F821
-                    for software in global_settings["software"]:  # noqa: F821
-                        self.load_software(software=software)
-
-            if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["software_image"]:
-                if not global_settings.get("software_image"):  # noqa: F821
-                    self.job.logger.warning("software_image not found in global_settings. Check if the key exists.")
-                elif global_settings["software_image"] is not None:  # noqa: F821
-                    for software_image in global_settings["software_image"]:  # noqa: F821
-                        self.load_software_image(software_image=software_image)
-
-            if validate_dlm_installed():
-                if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["validated_software"]:
-                    if not global_settings.get("validated_software"):  # noqa: F821
-                        self.job.logger.warning(
-                            "validated_software not found in global_settings. Check if the key exists."
-                        )
-                    elif global_settings["validated_software"] is not None:  # noqa: F821
-                        for validated_software in global_settings["validated_software"]:  # noqa: F821
-                            self.load_validated_software(validated_software=validated_software)
-
-        elif dlm_supports_softwarelcm():
-            if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["software"]:
-                if not global_settings.get("software"):  # noqa: F821
-                    self.job.logger.warning("software not found in global_settings. Check if the key exists.")
-                elif global_settings["software"] is not None:  # noqa: F821
-                    for software in global_settings["software"]:  # noqa: F821
-                        self.load_software(software=software)
-            if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["software_image"]:
-                if not global_settings.get("software_image"):  # noqa: F821
-                    self.job.logger.warning("software_image not found in global_settings. Check if the key exists.")
-                elif global_settings["software_image"] is not None:  # noqa: F821
-                    for software_image in global_settings["software_image"]:  # noqa: F821
-                        self.load_software_image(software_image=software_image)
-            if settings.PLUGINS_CONFIG["nautobot_ssot"]["bootstrap_models_to_sync"]["validated_software"]:
-                if not global_settings.get("validated_software"):  # noqa: F821
-                    self.job.logger.warning("validated_software not found in global_settings. Check if the key exists.")
-                elif global_settings["validated_software"] is not None:  # noqa: F821
-                    for validated_software in global_settings["validated_software"]:  # noqa: F821
-                        self.load_validated_software(validated_software=validated_software)
+        for model, is_synced in (
+            settings.PLUGINS_CONFIG.get("nautobot_ssot", {}).get("bootstrap_models_to_sync", {}).items()
+        ):
+            if not is_synced or (model == "validated_software" and not validate_dlm_installed()):
+                continue
+            self.load_model(global_settings, model)

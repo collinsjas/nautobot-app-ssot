@@ -20,6 +20,7 @@ from nautobot_ssot.integrations.meraki.diffsync.models.base import (
     Prefix,
     PrefixLocation,
 )
+from nautobot_ssot.integrations.meraki.utils.nautobot import update_note
 
 
 class NautobotNetwork(Network):
@@ -58,14 +59,13 @@ class NautobotNetwork(Network):
         site = Location.objects.get(id=self.uuid)
         if "timezone" in attrs:
             site.time_zone = attrs["timezone"]
-        if attrs.get("notes"):
-            new_note = Note(
+        if "notes" in attrs:
+            update_note(
+                nautobot_object=site,
                 note=attrs["notes"],
                 user=self.adapter.job.user,
-                assigned_object_type_id=self.adapter.contenttype_map["location"],
-                assigned_object_id=site.id,
+                contenttype_id=self.adapter.contenttype_map["location"],
             )
-            new_note.validated_save()
         if "tags" in attrs:
             site.tags.set(attrs["tags"])
             for tag in site.tags.all():
@@ -116,14 +116,16 @@ class NautobotOSVersion(OSVersion):
     def delete(self):
         """Delete SoftwareVersion in Nautobot from NautobotOSVersion object."""
         osversion = SoftwareVersion.objects.get(id=self.uuid)
+        super().delete()
         if hasattr(osversion, "validatedsoftwarelcm_set"):
             if osversion.validatedsoftwarelcm_set.count() != 0:
                 self.adapter.job.logger.warning(
                     f"SoftwareVersion {osversion.version} for {osversion.platform.name} is used with a ValidatedSoftware so won't be deleted."
                 )
-        else:
-            super().delete()
-            osversion.delete()
+                return self
+        # Deletion is deferred to sync_complete so Devices are repointed to their new SoftwareVersion first. Deleting
+        # here raises a ProtectedError because DiffSync processes osversion deletions before Device updates.
+        self.adapter.objects_to_delete["osversions"].append(osversion)
         return self
 
 
@@ -188,14 +190,13 @@ class NautobotDevice(Device):
             device.device_type_id = self.adapter.devicetype_map[attrs["model"]]
         if "network" in attrs:
             device.location = self.adapter.site_map[attrs["network"]]
-        if attrs.get("notes"):
-            new_note = Note(
+        if "notes" in attrs:
+            update_note(
+                nautobot_object=device,
                 note=attrs["notes"],
                 user=self.adapter.job.user,
-                assigned_object_type_id=self.adapter.contenttype_map["device"],
-                assigned_object_id=device.id,
+                contenttype_id=self.adapter.contenttype_map["device"],
             )
-            new_note.validated_save()
         if "tags" in attrs:
             device.tags.set(attrs["tags"])
             for tag in device.tags.all():
@@ -320,9 +321,14 @@ class NautobotPrefixLocation(PrefixLocation):
 
     def delete(self):
         """Delete Prefix in Nautobot from NautobotPrefix object."""
-        del_pf = PrefixLocationAssignment.objects.get(id=self.uuid)
         super().delete()
-        del_pf.delete()
+        try:
+            del_pf = PrefixLocationAssignment.objects.get(id=self.uuid)
+            del_pf.delete()
+        except PrefixLocationAssignment.DoesNotExist:
+            self.adapter.job.logger.debug(
+                f"Prefix {self.prefix} from location {self.location} has already been deleted."
+            )
         return self
 
 
@@ -339,7 +345,8 @@ class NautobotIPAddress(IPAddress):
             status_id=adapter.status_map["Active"],
             tenant_id=adapter.tenant_map[ids["tenant"]] if ids.get("tenant") else None,
         )
-        adapter.objects_to_create["ipaddrs-to-prefixes"].append((new_ip, adapter.prefix_map[attrs["prefix"]]))
+        if attrs["prefix"]:  # Check if a specific prefix has been defined for this IPAddress
+            adapter.objects_to_create["ipaddrs-to-prefixes"].append((new_ip, adapter.prefix_map[attrs["prefix"]]))
         new_ip.custom_field_data["system_of_record"] = "Meraki SSoT"
         new_ip.custom_field_data["last_synced_from_sor"] = datetime.today().date().isoformat()
         adapter.objects_to_create["ipaddrs"].append(new_ip)

@@ -3,6 +3,7 @@
 from collections import defaultdict
 
 from diffsync import Adapter
+from diffsync.enum import DiffSyncModelFlags
 from diffsync.exceptions import ObjectAlreadyExists, ObjectNotFound
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import ProtectedError
@@ -12,6 +13,8 @@ from nautobot.extras.models import Relationship as OrmRelationship
 from nautobot.extras.models import RelationshipAssociation as OrmRelationshipAssociation
 from nautobot.ipam.models import IPAddress as OrmIPAddress
 from nautobot.ipam.models import IPAddressToInterface
+from nautobot.ipam.models import Namespace as OrmNamespace
+from nautobot.ipam.models import Prefix as OrmPrefix
 
 from nautobot_ssot.integrations.aristacv.diffsync.models.nautobot import (
     NautobotCustomField,
@@ -23,7 +26,6 @@ from nautobot_ssot.integrations.aristacv.diffsync.models.nautobot import (
     NautobotPrefix,
 )
 from nautobot_ssot.integrations.aristacv.types import CloudVisionAppConfig
-from nautobot_ssot.integrations.aristacv.utils import nautobot
 
 
 class NautobotAdapter(Adapter):
@@ -54,7 +56,7 @@ class NautobotAdapter(Adapter):
                     device_model=dev.device_type.model,
                     serial=dev.serial,
                     status=dev.status.name,
-                    version=nautobot.get_device_version(dev),
+                    version=dev.software_version.version if dev.software_version else None,
                     uuid=dev.id,
                 )
                 self.add(new_device)
@@ -81,7 +83,7 @@ class NautobotAdapter(Adapter):
 
     def load_interfaces(self):
         """Add Nautobot Interface objects as DiffSync Port models."""
-        for intf in OrmInterface.objects.filter(device__device_type__manufacturer__name="Arista"):
+        for intf in OrmInterface.objects.filter(device__device_type__manufacturer__name="Arista").select_related("lag"):
             new_port = self.port(
                 name=intf.name,
                 device=intf.device.name,
@@ -92,6 +94,7 @@ class NautobotAdapter(Adapter):
                 mtu=intf.mtu,
                 port_type=intf.type,
                 status=intf.status.name,
+                lag=intf.lag.name if intf.lag else None,
                 uuid=intf.id,
             )
             self.add(new_port)
@@ -103,37 +106,44 @@ class NautobotAdapter(Adapter):
                     f"Unable to find Device {intf.device.name} in diff to assign to port {intf.name}. {err}"
                 )
 
+    def load_namespaces(self):
+        """Add Nautobot Namespace objects as DiffSync Namespace models."""
+        for ns in OrmNamespace.objects.all():
+            new_ns = self.namespace(
+                name=ns.name,
+                uuid=ns.id,
+            )
+            if not self.job.app_config.delete_namespaces_on_sync:
+                new_ns.model_flags = DiffSyncModelFlags.SKIP_UNMATCHED_DST
+            self.add(new_ns)
+
+    def load_prefixes(self):
+        """Add Nautobot Prefix objects as DiffSync Prefix models."""
+        for pf in OrmPrefix.objects.all():
+            new_pf = self.prefix(
+                prefix=str(pf.prefix),
+                namespace=pf.namespace.name,
+                uuid=pf.id,
+            )
+            if not self.job.app_config.delete_prefixes_on_sync:
+                new_pf.model_flags = DiffSyncModelFlags.SKIP_UNMATCHED_DST
+            self.add(new_pf)
+
     def load_ip_addresses(self):
         """Add Nautobot IPAddress objects as DiffSync IPAddress models."""
-        for ipaddr in OrmIPAddress.objects.filter(interfaces__device__device_type__manufacturer__name__in=["Arista"]):
-            try:
-                self.get(self.namespace, ipaddr.parent.namespace.name)
-            except ObjectNotFound:
-                new_ns = self.namespace(
-                    name=ipaddr.parent.namespace.name,
-                    uuid=ipaddr.parent.namespace.id,
-                )
-                self.add(new_ns)
-            try:
-                self.get(self.prefix, {"prefix": str(ipaddr.parent.prefix), "namespace": ipaddr.parent.namespace.name})
-            except ObjectNotFound:
-                new_pf = self.prefix(
-                    prefix=str(ipaddr.parent.prefix),
-                    namespace=ipaddr.parent.namespace.name,
-                    uuid=ipaddr.parent.id,
-                )
-                self.add(new_pf)
+        for ipaddr in OrmIPAddress.objects.all():
             new_ip = self.ipaddr(
                 address=str(ipaddr.address),
                 prefix=str(ipaddr.parent.prefix),
                 namespace=ipaddr.parent.namespace.name,
                 uuid=ipaddr.id,
             )
-            try:
-                self.add(new_ip)
-            except ObjectAlreadyExists as err:
-                self.job.logger.warning(f"Unable to load {ipaddr.address} as appears to be a duplicate. {err}")
-            ip_to_intfs = IPAddressToInterface.objects.filter(ip_address=ipaddr)
+            if not self.job.app_config.delete_ipaddresses_on_sync:
+                new_ip.model_flags = DiffSyncModelFlags.SKIP_UNMATCHED_DST
+            self.add(new_ip)
+            ip_to_intfs = IPAddressToInterface.objects.filter(
+                ip_address=ipaddr, interface__device__device_type__manufacturer__name="Arista"
+            )
             for mapping in ip_to_intfs:
                 new_map = self.ipassignment(
                     address=str(ipaddr.address),
@@ -144,7 +154,16 @@ class NautobotAdapter(Adapter):
                     or len(mapping.ip_address.primary_ip6_for.all()) > 0,
                     uuid=mapping.id,
                 )
-                self.add(new_map)
+                try:
+                    self.add(new_map)
+                except ObjectAlreadyExists as err:
+                    self.job.logger.warning(
+                        "Unable to attach %sDevice: %sInterface: %s. Error: %s",
+                        ipaddr.address,
+                        mapping.interface.device.name,
+                        mapping.interface.name,
+                        err,
+                    )
 
     def sync_complete(self, source: Adapter, *args, **kwargs):
         """Perform actions after sync is completed.
@@ -199,4 +218,6 @@ class NautobotAdapter(Adapter):
         """Load Nautobot models into DiffSync models."""
         self.load_devices()
         self.load_interfaces()
+        self.load_namespaces()
+        self.load_prefixes()
         self.load_ip_addresses()

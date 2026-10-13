@@ -7,6 +7,8 @@ The project is following Network to Code software development guidelines and is 
 - Python linting and formatting: `pylint` and `ruff`.
 - YAML linting is done with `yamllint`.
 - Django unit test to ensure the app is working properly.
+- Django Template linting: `djlint`
+- Django Template formatting: `djhtml`
 
 Documentation is built using [mkdocs](https://www.mkdocs.org/). The [Docker based development environment](dev_environment.md#docker-development-environment) automatically starts a container hosting a live version of the documentation website on [http://localhost:8001](http://localhost:8001) that auto-refreshes when you make any changes to your local files.
 
@@ -48,6 +50,19 @@ The branching policy includes the following tenets:
 - PRs intended to fix issues in the Nautobot LTM compatible release should be sourced from the latest `ltm-<major.minor>` branch instead of `develop`.
 
 Single Source of Truth will observe semantic versioning, as of 1.0. This may result in a quick turnaround in minor versions to keep pace with an ever-growing feature set.
+
+## Testing Standards
+
+All contributions must include appropriate test coverage to ensure stability, prevent regressions, and maintain confidence in releases.
+
+Testing standards include the following expectations:
+
+- All new features **must** include relevant unit tests.
+- Bug fixes **should** include tests that validate the reported issue and prevent regressions.
+- Tests should be written using Nautobot's base test cases and follow existing project patterns.
+- Existing tests **must not be broken** by a pull request.
+- Pull requests that reduce overall test coverage may be requested to add additional tests before approval.
+- Tests are expected to pass locally and in CI before a pull request is merged.
 
 ### Backporting to Older Releases
 
