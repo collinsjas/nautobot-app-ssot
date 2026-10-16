@@ -88,11 +88,15 @@ class IPAddress(base.IPAddress):
     def create(cls, adapter, ids, attrs):
         """Create an IPAddress in Nautobot."""
         from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Namespace  # pylint: disable=import-outside-toplevel
 
         status = Status.objects.get(name=attrs.get("status", "Active"))
+        # IPAddress has no `namespace_id` field; `namespace` is a constructor-only kwarg
+        # that auto-resolves `parent` (the containing Prefix) during clean().
+        namespace = Namespace.objects.get(pk=adapter.namespace_id)
         ipaddr = OrmIPAddress(
             address=f"{ids['address']}/{ids['prefix_length']}",
-            namespace_id=adapter.namespace_id,
+            namespace=namespace,
             description=attrs.get("description") or "",
             dns_name=attrs.get("dns_name") or "",
             status=status,
@@ -141,8 +145,13 @@ class DnsZone(base.DnsZone):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
+            # `ttl` is NOT NULL on DNSZone; omit it from defaults (letting the model's own
+            # default apply) rather than forcing an explicit None when the source has no TTL.
+            defaults = {}
+            if attrs.get("ttl") is not None:
+                defaults["ttl"] = attrs["ttl"]
             try:
-                OrmDNSZone.objects.get_or_create(name=ids["name"], defaults={"ttl": attrs.get("ttl")})
+                OrmDNSZone.objects.get_or_create(name=ids["name"], defaults=defaults)
             except Exception as error:  # pylint: disable=broad-except
                 # Guard against unexpected AuthZone name collisions within the same DNS View
                 # rather than letting an unhandled IntegrityError abort the whole sync.
@@ -159,7 +168,7 @@ class DnsZone(base.DnsZone):
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
             zone = OrmDNSZone.objects.filter(name=self.name).first()
-            if zone and "ttl" in attrs:
+            if zone and attrs.get("ttl") is not None:
                 zone.ttl = attrs["ttl"]
                 zone.validated_save()
         return super().update(attrs)
@@ -193,9 +202,13 @@ class DnsARecord(base.DnsARecord):
                 host=ids["address"], parent__namespace_id=adapter.namespace_id
             ).first()
             if zone and ip_address:
-                ARecord.objects.get_or_create(
-                    name=ids["name"], zone=zone, ip_address=ip_address, defaults={"_ttl": attrs.get("ttl")}
-                )
+                defaults = {}
+                if attrs.get("ttl") is not None:
+                    defaults["_ttl"] = attrs["ttl"]
+                try:
+                    ARecord.objects.get_or_create(name=ids["name"], zone=zone, ip_address=ip_address, defaults=defaults)
+                except Exception as error:  # pylint: disable=broad-except
+                    adapter.job.logger.error("Failed to create DNS A record %s: %s. Skipping.", ids["name"], error)
         else:
             from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
 
@@ -233,9 +246,15 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
                 host=ids["address"], parent__namespace_id=adapter.namespace_id
             ).first()
             if zone and ip_address:
-                AAAARecord.objects.get_or_create(
-                    name=ids["name"], zone=zone, ip_address=ip_address, defaults={"_ttl": attrs.get("ttl")}
-                )
+                defaults = {}
+                if attrs.get("ttl") is not None:
+                    defaults["_ttl"] = attrs["ttl"]
+                try:
+                    AAAARecord.objects.get_or_create(
+                        name=ids["name"], zone=zone, ip_address=ip_address, defaults=defaults
+                    )
+                except Exception as error:  # pylint: disable=broad-except
+                    adapter.job.logger.error("Failed to create DNS AAAA record %s: %s. Skipping.", ids["name"], error)
         else:
             from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
 
@@ -271,9 +290,13 @@ class DnsCnameRecord(base.DnsCnameRecord):
 
             zone = DNSZone.objects.filter(name=ids["zone"]).first()
             if zone:
-                CNAMERecord.objects.get_or_create(
-                    name=ids["name"], zone=zone, defaults={"alias": attrs.get("alias"), "_ttl": attrs.get("ttl")}
-                )
+                defaults = {"alias": attrs.get("alias")}
+                if attrs.get("ttl") is not None:
+                    defaults["_ttl"] = attrs["ttl"]
+                try:
+                    CNAMERecord.objects.get_or_create(name=ids["name"], zone=zone, defaults=defaults)
+                except Exception as error:  # pylint: disable=broad-except
+                    adapter.job.logger.error("Failed to create DNS CNAME record %s: %s. Skipping.", ids["name"], error)
         else:
             adapter.job.logger.warning(
                 "nautobot-dns-models not installed; skipping CNAME record %s -> %s (not representable "
@@ -308,9 +331,13 @@ class DnsPtrRecord(base.DnsPtrRecord):
 
             zone = DNSZone.objects.filter(name=ids["zone"]).first()
             if zone:
-                PTRRecord.objects.get_or_create(
-                    name=ids["name"], zone=zone, defaults={"ptrdname": attrs.get("ptrdname"), "_ttl": attrs.get("ttl")}
-                )
+                defaults = {"ptrdname": attrs.get("ptrdname")}
+                if attrs.get("ttl") is not None:
+                    defaults["_ttl"] = attrs["ttl"]
+                try:
+                    PTRRecord.objects.get_or_create(name=ids["name"], zone=zone, defaults=defaults)
+                except Exception as error:  # pylint: disable=broad-except
+                    adapter.job.logger.error("Failed to create DNS PTR record %s: %s. Skipping.", ids["name"], error)
         else:
             adapter.job.logger.debug(
                 "nautobot-dns-models not installed; skipping PTR record %s (no-op in fallback mode).", ids["name"]

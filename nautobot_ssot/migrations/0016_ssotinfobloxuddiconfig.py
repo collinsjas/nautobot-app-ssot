@@ -13,8 +13,10 @@ import nautobot_ssot.integrations.infoblox_uddi.models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("extras", "0001_initial"),
-        ("ipam", "0001_initial"),
+        # "extras", "0001_initial" was renamed to "0001_initial_part_1" in Nautobot; use the ExternalIntegration migration instead.
+        ("extras", "0102_set_null_objectchange_contenttype"),
+        # ipam.Namespace doesn't exist until this migration, not "0001_initial".
+        ("ipam", "0030_ipam__namespaces"),
         ("nautobot_ssot", "0015_ssotvsphereconfig"),
     ]
 

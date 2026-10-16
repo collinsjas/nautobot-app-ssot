@@ -12,7 +12,8 @@ generated `*_api.py` signatures should be checked before relying on this in prod
 import functools
 import logging
 import time
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from collections.abc import Callable, Iterator
+from typing import Any
 
 logger = logging.getLogger("nautobot.ssot.infoblox_uddi")
 
@@ -64,18 +65,19 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
             ImportError: If the `universal-ddi-python-client` package is not installed.
         """
         try:
-            from universal_ddi_client import ApiClient, Configuration  # pylint: disable=import-outside-toplevel
-            from universal_ddi_client.dns_config import (  # pylint: disable=import-outside-toplevel
+            # dns_config/dns_data/ipam ship as top-level packages, not submodules of universal_ddi_client.
+            from dns_config import (  # pylint: disable=import-outside-toplevel
                 AuthZoneApi,
                 ViewApi,
             )
-            from universal_ddi_client.dns_data import RecordApi  # pylint: disable=import-outside-toplevel
-            from universal_ddi_client.ipam import (  # pylint: disable=import-outside-toplevel
+            from dns_data import RecordApi  # pylint: disable=import-outside-toplevel
+            from ipam import (  # pylint: disable=import-outside-toplevel
                 AddressApi,
                 AddressBlockApi,
                 IpSpaceApi,
                 SubnetApi,
             )
+            from universal_ddi_client import ApiClient, Configuration  # pylint: disable=import-outside-toplevel
         except ImportError as error:
             raise ImportError(
                 "The `universal-ddi-python-client` package is required to use the Infoblox Universal DDI "
@@ -100,7 +102,7 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
         """Paginate a list method whose response includes `page.total_size`."""
         offset = 0
         while True:
-            response = list_method(_offset=offset, _limit=limit, **params)
+            response = list_method(offset=offset, limit=limit, **params)
             results = getattr(response, "results", []) or []
             yield from results
             page = getattr(response, "page", None)
@@ -114,7 +116,7 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
         """Paginate a list method whose response only includes `results` (no page metadata)."""
         offset = 0
         while True:
-            response = list_method(_offset=offset, _limit=limit, **params)
+            response = list_method(offset=offset, limit=limit, **params)
             results = getattr(response, "results", []) or []
             yield from results
             offset += len(results)
@@ -123,67 +125,77 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
 
     def list_all(
         self, list_method: Callable, paged: bool = True, limit: int = 1000, **params
-    ) -> List[Any]:
+    ) -> list[Any]:
         """Loop over a BloxOne SDK list() method, returning all results.
 
         Args:
             list_method: Bound SDK `list()` method to call repeatedly (e.g. `self._subnet_api.list`).
             paged: True for resources returning `page.total_size` (Address, Subnet, etc.), False for
                 resources returning only `results` (AddressBlock, IPSpace, etc.).
-            limit: `_limit` page size to request.
-            **params: Additional query params (`_filter`, `_fields`, `_order_by`) passed through.
+            limit: `limit` page size to request.
+            **params: Additional query params (`filter`, `fields`, `order_by`) passed through.
         """
         loop = self._list_all_paged if paged else self._list_all_offset_only
         return list(loop(list_method, limit=limit, **params))
 
     @retry_on_api_exception()
-    def get_ip_space(self, name: str) -> Optional[Any]:
+    def get_ip_space(self, name: str) -> Any | None:
         """Get a single IP Space by name."""
-        results = self.list_all(self._ip_space_api.list, paged=False, _filter=f'name=="{name}"')
+        results = self.list_all(self._ip_space_api.list, paged=False, filter=f'name=="{name}"')
         return results[0] if results else None
 
     @retry_on_api_exception()
-    def list_address_blocks(self, ip_space_id: str) -> List[Any]:
+    def list_address_blocks(self, ip_space_id: str) -> list[Any]:
         """List all Address Blocks (containers) in the given IP Space."""
-        return self.list_all(self._address_block_api.list, paged=False, _filter=f'space=="{ip_space_id}"')
+        return self.list_all(
+            self._address_block_api.list, paged=False, filter=f'space=="{ip_space_id}"', order_by="id"
+        )
 
     @retry_on_api_exception()
-    def list_subnets(self, ip_space_id: str) -> List[Any]:
+    def list_subnets(self, ip_space_id: str) -> list[Any]:
         """List all Subnets (networks) in the given IP Space."""
         return self.list_all(
             self._subnet_api.list,
             paged=True,
-            _filter=f'space=="{ip_space_id}"',
-            _fields="id,address,cidr,space,tags,comment",
+            filter=f'space=="{ip_space_id}"',
+            fields="id,address,cidr,space,tags,comment",
+            order_by="id",
         )
 
     @retry_on_api_exception()
-    def list_addresses(self, ip_space_id: str) -> List[Any]:
+    def list_addresses(self, ip_space_id: str) -> list[Any]:
         """List all Addresses in the given IP Space."""
         return self.list_all(
             self._address_api.list,
             paged=True,
-            _filter=f'space=="{ip_space_id}"',
-            _fields="id,address,space,tags,comment,usage",
+            filter=f'space=="{ip_space_id}"',
+            fields="id,address,space,tags,comment,usage",
+            order_by="id",
         )
 
     @retry_on_api_exception()
-    def list_dns_views(self) -> List[Any]:
+    def list_dns_views(self) -> list[Any]:
         """List all DNS Views."""
-        return self.list_all(self._dns_view_api.list, paged=True)
+        return self.list_all(self._dns_view_api.list, paged=True, order_by="id")
 
     @retry_on_api_exception()
-    def list_dns_zones(self, view_id: Optional[str] = None) -> List[Any]:
+    def get_dns_view(self, name: str) -> Any | None:
+        """Get a single DNS View by name."""
+        results = self.list_all(self._dns_view_api.list, paged=True, filter=f'name=="{name}"')
+        return results[0] if results else None
+
+    @retry_on_api_exception()
+    def list_dns_zones(self, view_id: str | None = None) -> list[Any]:
         """List all DNS Zones, optionally scoped to a single DNS View."""
-        params: Dict[str, Any] = {}
+        params: dict[str, Any] = {"order_by": "id"}
         if view_id:
-            params["_filter"] = f'view=="{view_id}"'
+            params["filter"] = f'view=="{view_id}"'
         return self.list_all(self._dns_zone_api.list, paged=True, **params)
 
     @retry_on_api_exception()
-    def list_dns_records(self, zone_id: str, record_type: Optional[str] = None) -> List[Any]:
+    def list_dns_records(self, zone_id: str, record_type: str | None = None) -> list[Any]:
         """List all DNS Records in a given zone, optionally filtered by record type."""
         dns_filter = f"zone=='{zone_id}'"
         if record_type:
             dns_filter += f" and type=='{record_type}'"
-        return self.list_all(self._dns_record_api.list, paged=True, _filter=dns_filter)
+        return self.list_all(self._dns_record_api.list, paged=True, filter=dns_filter, order_by="id")

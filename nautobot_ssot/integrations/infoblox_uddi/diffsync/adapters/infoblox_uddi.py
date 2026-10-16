@@ -3,6 +3,7 @@
 import ipaddress
 
 from diffsync import DiffSync
+from diffsync.exceptions import ObjectAlreadyExists
 
 from nautobot_ssot.integrations.infoblox_uddi.diffsync.models import base
 
@@ -33,6 +34,7 @@ class InfobloxUDDIAdapter(DiffSync):
         self.conn = conn
         self.config = config
         self._ip_space_id = None
+        self._dns_view_id = False
         self._subnet_networks = []
 
     def _get_ip_space_id(self) -> str:
@@ -43,6 +45,19 @@ class InfobloxUDDIAdapter(DiffSync):
                 raise ValueError(f"IP Space '{self.config.uddi_ip_space}' not found in Infoblox Universal DDI.")
             self._ip_space_id = ip_space.id
         return self._ip_space_id
+
+    def _get_dns_view_id(self) -> str | None:
+        """Resolve and cache the configured DNS View's BloxOne id, or None to sync all views."""
+        if self._dns_view_id is False:
+            dns_view_name = getattr(self.config, "dns_view", "") or ""
+            if not dns_view_name:
+                self._dns_view_id = None
+            else:
+                dns_view = self.conn.get_dns_view(dns_view_name)
+                if dns_view is None:
+                    raise ValueError(f"DNS View '{dns_view_name}' not found in Infoblox Universal DDI.")
+                self._dns_view_id = dns_view.id
+        return self._dns_view_id
 
     def load_prefixes(self):
         """Load Prefixes (AddressBlocks as containers, Subnets as networks) from BloxOne.
@@ -55,26 +70,30 @@ class InfobloxUDDIAdapter(DiffSync):
         namespace = self.config.default_namespace.name
         for block in self.conn.list_address_blocks(ip_space_id):
             network_str = f"{block.address}/{block.cidr}"
-            self.add(
-                self.prefix(
-                    network=network_str,
-                    namespace=namespace,
-                    prefix_type="container",
-                    description=getattr(block, "comment", None),
-                )
+            new_prefix = self.prefix(
+                network=network_str,
+                namespace=namespace,
+                prefix_type="container",
+                description=getattr(block, "comment", None),
             )
+            try:
+                self.add(new_prefix)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate prefix found: {new_prefix}.")
         for subnet in self.conn.list_subnets(ip_space_id):
             network_str = f"{subnet.address}/{subnet.cidr}"
             network = ipaddress.ip_network(network_str, strict=False)
             self._subnet_networks.append(network)
-            self.add(
-                self.prefix(
-                    network=network_str,
-                    namespace=namespace,
-                    prefix_type="network",
-                    description=getattr(subnet, "comment", None),
-                )
+            new_prefix = self.prefix(
+                network=network_str,
+                namespace=namespace,
+                prefix_type="network",
+                description=getattr(subnet, "comment", None),
             )
+            try:
+                self.add(new_prefix)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate prefix found: {new_prefix}.")
 
     def _containing_prefix_length(self, address: str) -> int:
         """Return the prefix length of the loaded subnet containing `address`.
@@ -92,19 +111,25 @@ class InfobloxUDDIAdapter(DiffSync):
         ip_space_id = self._get_ip_space_id()
         namespace = self.config.default_namespace.name
         for address in self.conn.list_addresses(ip_space_id):
-            self.add(
-                self.ipaddress(
-                    address=address.address,
-                    prefix_length=self._containing_prefix_length(address.address),
-                    namespace=namespace,
-                    description=getattr(address, "comment", None),
-                )
+            new_ipaddress = self.ipaddress(
+                address=address.address,
+                prefix_length=self._containing_prefix_length(address.address),
+                namespace=namespace,
+                description=getattr(address, "comment", None),
             )
+            try:
+                self.add(new_ipaddress)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate IP Address found: {new_ipaddress}.")
 
     def load_dns_zones(self):
-        """Load DNS Zones from BloxOne."""
-        for zone in self.conn.list_dns_zones():
-            self.add(self.dnszone(name=zone.fqdn, ttl=getattr(zone, "ttl", None)))
+        """Load DNS Zones from BloxOne, scoped to the configured DNS View if set."""
+        for zone in self.conn.list_dns_zones(view_id=self._get_dns_view_id()):
+            new_zone = self.dnszone(name=zone.fqdn, ttl=getattr(zone, "ttl", None))
+            try:
+                self.add(new_zone)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate DNS Zone found: {new_zone}.")
 
     def load_dns_records(self):
         """Load DNS Records from BloxOne, batched per-zone, filtered by configured record types."""
@@ -114,7 +139,7 @@ class InfobloxUDDIAdapter(DiffSync):
             "CNAME": self.dnscnamerecord,
             "PTR": self.dnsptrrecord,
         }
-        for zone in self.conn.list_dns_zones():
+        for zone in self.conn.list_dns_zones(view_id=self._get_dns_view_id()):
             for record_type in self.config.dns_record_types:
                 model_cls = record_type_map.get(record_type)
                 if model_cls is None:
@@ -128,11 +153,17 @@ class InfobloxUDDIAdapter(DiffSync):
         name = getattr(record, "name_in_zone", "") or ""
         ttl = getattr(record, "ttl", None)
         if record_type in ("A", "AAAA"):
-            self.add(model_cls(name=name, zone=zone_fqdn, address=rdata.get("address"), ttl=ttl))
+            new_record = model_cls(name=name, zone=zone_fqdn, address=rdata.get("address"), ttl=ttl)
         elif record_type == "CNAME":
-            self.add(model_cls(name=name, zone=zone_fqdn, alias=rdata.get("cname"), ttl=ttl))
+            new_record = model_cls(name=name, zone=zone_fqdn, alias=rdata.get("cname"), ttl=ttl)
         elif record_type == "PTR":
-            self.add(model_cls(name=name, zone=zone_fqdn, ptrdname=rdata.get("dname"), ttl=ttl))
+            new_record = model_cls(name=name, zone=zone_fqdn, ptrdname=rdata.get("dname"), ttl=ttl)
+        else:
+            return
+        try:
+            self.add(new_record)
+        except ObjectAlreadyExists:
+            self.job.logger.warning(f"Duplicate DNS {record_type} record found: {new_record}.")
 
     def load(self):
         """Load data from Infoblox Universal DDI."""

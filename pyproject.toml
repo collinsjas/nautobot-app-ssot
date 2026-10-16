@@ -63,7 +63,8 @@ meraki = [
 ]
 slurpit-sdk = { version = "0.9.107", optional = true }  # Pinned to 0.9.107 due to significant changes being made to the sdk's api
 # used for the Infoblox Universal DDI (BloxOne) integration; raises the floor to Python 3.10 for this extra only
-universal-ddi-python-client = { version = ">=1.0.0", optional = true, python = ">=3.10" }
+# latest published release is 0.2.0 as of 2026-10; ">=1.0.0" does not exist and makes this extra uninstallable
+universal-ddi-python-client = { version = ">=0.2.0", optional = true, python = ">=3.10" }
 # optional soft dependency for full DNS Zone/Record fidelity in the Infoblox Universal DDI integration
 nautobot-dns-models = { version = ">=1.0.0", optional = true }
 

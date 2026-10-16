@@ -1,6 +1,7 @@
 """DiffSync adapter for loading data from Nautobot for the Infoblox Universal DDI integration."""
 
 from diffsync import DiffSync
+from diffsync.exceptions import ObjectAlreadyExists
 from nautobot.extras.models import Tag
 from nautobot.ipam.models import IPAddress as OrmIPAddress
 from nautobot.ipam.models import Prefix as OrmPrefix
@@ -38,29 +39,33 @@ class NautobotAdapter(DiffSync):
     def load_prefixes(self):
         """Load Prefixes from Nautobot."""
         for prefix in OrmPrefix.objects.filter(namespace_id=self.namespace_id, tags=self.sync_tag):
-            self.add(
-                self.prefix(
-                    network=str(prefix.prefix),
-                    namespace=prefix.namespace.name,
-                    prefix_type=prefix.type,
-                    description=prefix.description,
-                    status=prefix.status.name,
-                )
+            new_prefix = self.prefix(
+                network=str(prefix.prefix),
+                namespace=prefix.namespace.name,
+                prefix_type=prefix.type,
+                description=prefix.description,
+                status=prefix.status.name,
             )
+            try:
+                self.add(new_prefix)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate prefix found: {new_prefix}.")
 
     def load_ip_addresses(self):
         """Load IP Addresses from Nautobot."""
         for ipaddr in OrmIPAddress.objects.filter(parent__namespace_id=self.namespace_id, tags=self.sync_tag):
-            self.add(
-                self.ipaddress(
-                    address=str(ipaddr.host),
-                    prefix_length=ipaddr.mask_length,
-                    namespace=ipaddr.parent.namespace.name,
-                    status=ipaddr.status.name,
-                    description=ipaddr.description,
-                    dns_name=ipaddr.dns_name,
-                )
+            new_ipaddress = self.ipaddress(
+                address=str(ipaddr.host),
+                prefix_length=ipaddr.mask_length,
+                namespace=ipaddr.parent.namespace.name,
+                status=ipaddr.status.name,
+                description=ipaddr.description,
+                dns_name=ipaddr.dns_name,
             )
+            try:
+                self.add(new_ipaddress)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate IP Address found: {new_ipaddress}.")
 
     def load_dns_zones(self):
         """Load DNS Zones from Nautobot, if `nautobot-dns-models` is installed."""
@@ -69,7 +74,11 @@ class NautobotAdapter(DiffSync):
         from nautobot_dns_models.models import DNSZone  # pylint: disable=import-outside-toplevel
 
         for zone in DNSZone.objects.filter(tags=self.sync_tag):
-            self.add(self.dnszone(name=zone.name, ttl=zone.ttl))
+            new_zone = self.dnszone(name=zone.name, ttl=zone.ttl)
+            try:
+                self.add(new_zone)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate DNS Zone found: {new_zone}.")
 
     def load_dns_records(self):
         """Load DNS Records from Nautobot, if `nautobot-dns-models` is installed."""
@@ -83,23 +92,37 @@ class NautobotAdapter(DiffSync):
         )
 
         for record in ARecord.objects.filter(tags=self.sync_tag):
-            self.add(
-                self.dnsarecord(
-                    name=record.name, zone=record.zone.name, address=str(record.ip_address.host), ttl=record.ttl
-                )
+            new_record = self.dnsarecord(
+                name=record.name, zone=record.zone.name, address=str(record.ip_address.host), ttl=record.ttl
             )
+            try:
+                self.add(new_record)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate DNS A record found: {new_record}.")
         for record in AAAARecord.objects.filter(tags=self.sync_tag):
-            self.add(
-                self.dnsaaaarecord(
-                    name=record.name, zone=record.zone.name, address=str(record.ip_address.host), ttl=record.ttl
-                )
+            new_record = self.dnsaaaarecord(
+                name=record.name, zone=record.zone.name, address=str(record.ip_address.host), ttl=record.ttl
             )
+            try:
+                self.add(new_record)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate DNS AAAA record found: {new_record}.")
         for record in CNAMERecord.objects.filter(tags=self.sync_tag):
-            self.add(self.dnscnamerecord(name=record.name, zone=record.zone.name, alias=record.alias, ttl=record.ttl))
-        for record in PTRRecord.objects.filter(tags=self.sync_tag):
-            self.add(
-                self.dnsptrrecord(name=record.name, zone=record.zone.name, ptrdname=record.ptrdname, ttl=record.ttl)
+            new_record = self.dnscnamerecord(
+                name=record.name, zone=record.zone.name, alias=record.alias, ttl=record.ttl
             )
+            try:
+                self.add(new_record)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate DNS CNAME record found: {new_record}.")
+        for record in PTRRecord.objects.filter(tags=self.sync_tag):
+            new_record = self.dnsptrrecord(
+                name=record.name, zone=record.zone.name, ptrdname=record.ptrdname, ttl=record.ttl
+            )
+            try:
+                self.add(new_record)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate DNS PTR record found: {new_record}.")
 
     def load(self):
         """Load data from Nautobot."""

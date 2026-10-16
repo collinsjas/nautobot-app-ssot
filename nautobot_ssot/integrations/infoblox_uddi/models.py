@@ -71,6 +71,14 @@ class SSOTInfobloxUDDIConfig(PrimaryModel):  # pylint: disable=too-many-ancestor
         verbose_name="DNS Record Types",
         help_text="Which DNS record types (A/AAAA/CNAME/PTR) to sync.",
     )
+    dns_view = models.CharField(
+        max_length=CHARFIELD_MAX_LENGTH,
+        blank=True,
+        verbose_name="DNS View",
+        help_text="Name of the single BloxOne DNS View to sync zones/records from. If left blank, zones/records "
+        "from all DNS Views are loaded, and same-named zones in different views will collide (only the "
+        "first-seen one is synced).",
+    )
     safe_delete_mode = models.BooleanField(
         default=True,
         verbose_name="Safe Delete Mode",
