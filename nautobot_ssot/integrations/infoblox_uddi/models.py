@@ -52,6 +52,7 @@ class SSOTInfobloxUDDIConfig(PrimaryModel):  # pylint: disable=too-many-ancestor
     )
     import_prefixes = models.BooleanField(default=True, verbose_name="Import Prefixes")
     import_ip_addresses = models.BooleanField(default=True, verbose_name="Import IP Addresses")
+    import_ip_ranges = models.BooleanField(default=True, verbose_name="Import IP Ranges")
     import_dns_zones = models.BooleanField(default=True, verbose_name="Import DNS Zones")
     import_dns_records = models.BooleanField(default=True, verbose_name="Import DNS Records")
     uddi_ip_space = models.CharField(

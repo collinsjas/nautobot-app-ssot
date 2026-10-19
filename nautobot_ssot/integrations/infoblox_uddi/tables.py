@@ -16,6 +16,7 @@ class SSOTInfobloxUDDIConfigTable(BaseTable):
     enable_sync_to_nautobot = BooleanColumn(orderable=False)
     import_prefixes = BooleanColumn(orderable=False)
     import_ip_addresses = BooleanColumn(orderable=False)
+    import_ip_ranges = BooleanColumn(orderable=False)
     import_dns_zones = BooleanColumn(orderable=False)
     import_dns_records = BooleanColumn(orderable=False)
     dns_view = tables.Column()
@@ -35,6 +36,7 @@ class SSOTInfobloxUDDIConfigTable(BaseTable):
             "enable_sync_to_nautobot",
             "import_prefixes",
             "import_ip_addresses",
+            "import_ip_ranges",
             "import_dns_zones",
             "import_dns_records",
             "dns_view",

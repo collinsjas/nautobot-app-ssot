@@ -32,6 +32,16 @@ def _safe_delete_or_hard_delete(instance, safe_delete_mode):
     instance.tags.add(tag)
 
 
+def _get_or_create_dns_view(view_name):
+    """Resolve a DNSView by name, creating it if needed. Returns None if `view_name` is blank."""
+    if not view_name:
+        return None
+    from nautobot_dns_models.models import DNSView  # pylint: disable=import-outside-toplevel
+
+    view, _ = DNSView.objects.get_or_create(name=view_name)
+    return view
+
+
 class Prefix(base.Prefix):
     """Nautobot ORM-backed Prefix model."""
 
@@ -132,6 +142,58 @@ class IPAddress(base.IPAddress):
         return super().delete()
 
 
+class IPAddressRange(base.IPAddressRange):
+    """Nautobot ORM-backed IPAddressRange model."""
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """Create an IPAddressRange in Nautobot."""
+        from nautobot.ipam.models import IPAddressRange as OrmIPAddressRange  # pylint: disable=import-outside-toplevel
+        from nautobot.ipam.models import Namespace  # pylint: disable=import-outside-toplevel
+
+        status = Status.objects.get(name=attrs.get("status", "Active"))
+        namespace = Namespace.objects.get(pk=adapter.namespace_id)
+        ip_range = OrmIPAddressRange(
+            start_address=ids["start_address"],
+            end_address=attrs["end_address"],
+            namespace=namespace,
+            name=attrs.get("name") or "",
+            description=attrs.get("description") or "",
+            status=status,
+        )
+        ip_range.validated_save()
+        ip_range.tags.add(adapter.sync_tag)
+        return super().create(adapter, ids, attrs)
+
+    def update(self, attrs):
+        """Update an IPAddressRange in Nautobot."""
+        from nautobot.ipam.models import IPAddressRange as OrmIPAddressRange  # pylint: disable=import-outside-toplevel
+
+        ip_range = OrmIPAddressRange.objects.get(
+            start_address=self.start_address, parent__namespace_id=self.adapter.namespace_id
+        )
+        if "end_address" in attrs:
+            ip_range.end_address = attrs["end_address"]
+        if "name" in attrs:
+            ip_range.name = attrs["name"] or ""
+        if "description" in attrs:
+            ip_range.description = attrs["description"] or ""
+        if "status" in attrs:
+            ip_range.status = Status.objects.get(name=attrs["status"])
+        ip_range.validated_save()
+        return super().update(attrs)
+
+    def delete(self):
+        """Delete (or safe-delete) an IPAddressRange from Nautobot."""
+        from nautobot.ipam.models import IPAddressRange as OrmIPAddressRange  # pylint: disable=import-outside-toplevel
+
+        ip_range = OrmIPAddressRange.objects.get(
+            start_address=self.start_address, parent__namespace_id=self.adapter.namespace_id
+        )
+        _safe_delete_or_hard_delete(ip_range, self.adapter.config.safe_delete_mode)
+        return super().delete()
+
+
 class DnsZone(base.DnsZone):
     """Nautobot ORM-backed DNS Zone model.
 
@@ -150,8 +212,14 @@ class DnsZone(base.DnsZone):
             defaults = {}
             if attrs.get("ttl") is not None:
                 defaults["ttl"] = attrs["ttl"]
+            # dns_view is part of the real (name, dns_view) uniqueness - included in the lookup,
+            # not just defaults, so distinct per-view zones are matched/created correctly.
+            lookup = {"name": ids["name"]}
+            dns_view = _get_or_create_dns_view(attrs.get("view"))
+            if dns_view is not None:
+                lookup["dns_view"] = dns_view
             try:
-                zone, _ = OrmDNSZone.objects.get_or_create(name=ids["name"], defaults=defaults)
+                zone, _ = OrmDNSZone.objects.get_or_create(defaults=defaults, **lookup)
                 zone.tags.add(adapter.sync_tag)
             except Exception as error:  # pylint: disable=broad-except
                 # Guard against unexpected AuthZone name collisions within the same DNS View
@@ -169,9 +237,19 @@ class DnsZone(base.DnsZone):
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
             zone = OrmDNSZone.objects.filter(name=self.name).first()
-            if zone and attrs.get("ttl") is not None:
-                zone.ttl = attrs["ttl"]
-                zone.validated_save()
+            if zone:
+                update_fields = []
+                if attrs.get("ttl") is not None and zone.ttl != attrs["ttl"]:
+                    zone.ttl = attrs["ttl"]
+                    update_fields.append("ttl")
+                if attrs.get("view") and zone.dns_view.name != attrs["view"]:
+                    zone.dns_view = _get_or_create_dns_view(attrs["view"])
+                    update_fields.append("dns_view")
+                if update_fields:
+                    # Bypass full_clean(): pre-existing zones may carry legacy required-field
+                    # gaps (soa_mname/soa_rname/filename) or wire-format-invalid (trailing-dot)
+                    # names that predate validation on this path - not in scope for this sync.
+                    zone.save(update_fields=update_fields)
         return super().update(attrs)
 
     def delete(self):

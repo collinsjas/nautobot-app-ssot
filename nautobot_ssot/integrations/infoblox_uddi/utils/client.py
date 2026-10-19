@@ -75,6 +75,7 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
                 AddressApi,
                 AddressBlockApi,
                 IpSpaceApi,
+                RangeApi,
                 SubnetApi,
             )
             from universal_ddi_client import ApiClient, Configuration  # pylint: disable=import-outside-toplevel
@@ -93,6 +94,7 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
         self._address_block_api = AddressBlockApi(self.api_client)
         self._subnet_api = SubnetApi(self.api_client)
         self._address_api = AddressApi(self.api_client)
+        self._range_api = RangeApi(self.api_client)
         self._dns_view_api = ViewApi(self.api_client)
         self._dns_zone_api = AuthZoneApi(self.api_client)
         self._dns_record_api = RecordApi(self.api_client)
@@ -170,6 +172,17 @@ class InfobloxUDDIApi:  # pylint: disable=too-many-instance-attributes
             paged=True,
             filter=f'space=="{ip_space_id}"',
             fields="id,address,space,tags,comment,usage",
+            order_by="id",
+        )
+
+    @retry_on_api_exception()
+    def list_ranges(self, ip_space_id: str) -> list[Any]:
+        """List all DHCP Ranges in the given IP Space."""
+        return self.list_all(
+            self._range_api.list,
+            paged=True,
+            filter=f'space=="{ip_space_id}"',
+            fields="id,start,end,name,comment,space,disable_dhcp",
             order_by="id",
         )
 

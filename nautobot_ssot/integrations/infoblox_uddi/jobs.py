@@ -54,7 +54,7 @@ class InfobloxUDDIDataSource(DataSource):
 
         name = "Infoblox Universal DDI ⟹ Nautobot"
         data_source = "Infoblox Universal DDI"
-        description = "Sync Prefixes/IP Addresses/DNS Zones/DNS Records from Infoblox Universal DDI to Nautobot"
+        description = "Sync Prefixes/IP Addresses/IP Ranges/DNS Zones/DNS Records from Infoblox Universal DDI to Nautobot"
 
     @classmethod
     def data_mappings(cls):
@@ -62,6 +62,7 @@ class InfobloxUDDIDataSource(DataSource):
         return (
             DataMapping("subnet / address block", None, "Prefix", reverse("ipam:prefix_list")),
             DataMapping("address", None, "IP Address", reverse("ipam:ipaddress_list")),
+            DataMapping("range", None, "IP Address Range", reverse("ipam:ipaddressrange_list")),
             DataMapping("auth zone", None, "DNS Zone", None),
             DataMapping("record (A/AAAA/CNAME/PTR)", None, "DNS Record / IPAddress.dns_name", None),
         )

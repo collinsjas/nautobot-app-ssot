@@ -4,6 +4,7 @@ from diffsync import DiffSync
 from diffsync.exceptions import ObjectAlreadyExists
 from nautobot.extras.models import Tag
 from nautobot.ipam.models import IPAddress as OrmIPAddress
+from nautobot.ipam.models import IPAddressRange as OrmIPAddressRange
 from nautobot.ipam.models import Prefix as OrmPrefix
 
 from nautobot_ssot.utils import validate_dns_models_installed
@@ -19,13 +20,23 @@ class NautobotAdapter(DiffSync):
 
     prefix = nb_models.Prefix
     ipaddress = nb_models.IPAddress
+    ipaddressrange = nb_models.IPAddressRange
     dnszone = nb_models.DnsZone
     dnsarecord = nb_models.DnsARecord
     dnsaaaarecord = nb_models.DnsAaaaRecord
     dnscnamerecord = nb_models.DnsCnameRecord
     dnsptrrecord = nb_models.DnsPtrRecord
 
-    top_level = ["prefix", "ipaddress", "dnszone", "dnsarecord", "dnsaaaarecord", "dnscnamerecord", "dnsptrrecord"]
+    top_level = [
+        "prefix",
+        "ipaddress",
+        "ipaddressrange",
+        "dnszone",
+        "dnsarecord",
+        "dnsaaaarecord",
+        "dnscnamerecord",
+        "dnsptrrecord",
+    ]
 
     def __init__(self, *args, job=None, sync=None, config: SSOTInfobloxUDDIConfig = None, **kwargs):
         """Initialize NautobotAdapter."""
@@ -67,6 +78,21 @@ class NautobotAdapter(DiffSync):
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate IP Address found: {new_ipaddress}.")
 
+    def load_ip_ranges(self):
+        """Load IP Address Ranges from Nautobot."""
+        for ip_range in OrmIPAddressRange.objects.filter(parent__namespace_id=self.namespace_id, tags=self.sync_tag):
+            new_range = self.ipaddressrange(
+                start_address=str(ip_range.start_address),
+                end_address=str(ip_range.end_address),
+                namespace=ip_range.parent.namespace.name,
+                name=ip_range.name,
+                description=ip_range.description,
+            )
+            try:
+                self.add(new_range)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate IP Address Range found: {new_range}.")
+
     def load_dns_zones(self):
         """Load DNS Zones from Nautobot, if `nautobot-dns-models` is installed."""
         if not validate_dns_models_installed():
@@ -74,7 +100,7 @@ class NautobotAdapter(DiffSync):
         from nautobot_dns_models.models import DNSZone  # pylint: disable=import-outside-toplevel
 
         for zone in DNSZone.objects.filter(tags=self.sync_tag):
-            new_zone = self.dnszone(name=zone.name, ttl=zone.ttl)
+            new_zone = self.dnszone(name=zone.name, ttl=zone.ttl, view=zone.dns_view.name)
             try:
                 self.add(new_zone)
             except ObjectAlreadyExists:
@@ -128,6 +154,8 @@ class NautobotAdapter(DiffSync):
         """Load data from Nautobot."""
         self.load_prefixes()
         self.load_ip_addresses()
+        if self.config.import_ip_ranges:
+            self.load_ip_ranges()
         if self.config.import_dns_zones:
             self.load_dns_zones()
         if self.config.import_dns_records:

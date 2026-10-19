@@ -18,13 +18,23 @@ class InfobloxUDDIAdapter(DiffSync):
 
     prefix = base.Prefix
     ipaddress = base.IPAddress
+    ipaddressrange = base.IPAddressRange
     dnszone = base.DnsZone
     dnsarecord = base.DnsARecord
     dnsaaaarecord = base.DnsAaaaRecord
     dnscnamerecord = base.DnsCnameRecord
     dnsptrrecord = base.DnsPtrRecord
 
-    top_level = ["prefix", "ipaddress", "dnszone", "dnsarecord", "dnsaaaarecord", "dnscnamerecord", "dnsptrrecord"]
+    top_level = [
+        "prefix",
+        "ipaddress",
+        "ipaddressrange",
+        "dnszone",
+        "dnsarecord",
+        "dnsaaaarecord",
+        "dnscnamerecord",
+        "dnsptrrecord",
+    ]
 
     def __init__(self, *args, job=None, sync=None, conn=None, config=None, **kwargs):
         """Initialize InfobloxUDDIAdapter."""
@@ -35,6 +45,7 @@ class InfobloxUDDIAdapter(DiffSync):
         self.config = config
         self._ip_space_id = None
         self._dns_view_id = False
+        self._view_names_by_id = None
         self._subnet_networks = []
 
     def _get_ip_space_id(self) -> str:
@@ -58,6 +69,12 @@ class InfobloxUDDIAdapter(DiffSync):
                     raise ValueError(f"DNS View '{dns_view_name}' not found in Infoblox Universal DDI.")
                 self._dns_view_id = dns_view.id
         return self._dns_view_id
+
+    def _get_view_name(self, view_id: str | None) -> str:
+        """Resolve a BloxOne DNS View id to its name, caching the full id->name map."""
+        if self._view_names_by_id is None:
+            self._view_names_by_id = {view.id: view.name for view in self.conn.list_dns_views()}
+        return self._view_names_by_id.get(view_id, "")
 
     def load_prefixes(self):
         """Load Prefixes (AddressBlocks as containers, Subnets as networks) from BloxOne.
@@ -122,10 +139,29 @@ class InfobloxUDDIAdapter(DiffSync):
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate IP Address found: {new_ipaddress}.")
 
+    def load_ip_ranges(self):
+        """Load DHCP Ranges from BloxOne."""
+        ip_space_id = self._get_ip_space_id()
+        namespace = self.config.default_namespace.name
+        for ip_range in self.conn.list_ranges(ip_space_id):
+            new_range = self.ipaddressrange(
+                start_address=ip_range.start,
+                end_address=ip_range.end,
+                namespace=namespace,
+                name=getattr(ip_range, "name", None) or "",
+                description=getattr(ip_range, "comment", None),
+            )
+            try:
+                self.add(new_range)
+            except ObjectAlreadyExists:
+                self.job.logger.warning(f"Duplicate IP Address Range found: {new_range}.")
+
     def load_dns_zones(self):
         """Load DNS Zones from BloxOne, scoped to the configured DNS View if set."""
         for zone in self.conn.list_dns_zones(view_id=self._get_dns_view_id()):
-            new_zone = self.dnszone(name=zone.fqdn, ttl=getattr(zone, "ttl", None))
+            new_zone = self.dnszone(
+                name=zone.fqdn, ttl=getattr(zone, "ttl", None), view=self._get_view_name(getattr(zone, "view", None))
+            )
             try:
                 self.add(new_zone)
             except ObjectAlreadyExists:
@@ -171,6 +207,8 @@ class InfobloxUDDIAdapter(DiffSync):
             self.load_prefixes()
         if self.config.import_ip_addresses:
             self.load_ip_addresses()
+        if self.config.import_ip_ranges:
+            self.load_ip_ranges()
         if self.config.import_dns_zones:
             self.load_dns_zones()
         if self.config.import_dns_records:

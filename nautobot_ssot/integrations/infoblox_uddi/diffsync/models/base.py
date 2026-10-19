@@ -8,7 +8,6 @@ needed on that side. The Nautobot-side adapter uses the subclasses defined in
 DNS fallback behavior).
 """
 
-from typing import Optional
 
 from diffsync import DiffSyncModel
 
@@ -23,7 +22,7 @@ class Prefix(DiffSyncModel):
     network: str
     namespace: str
     prefix_type: str = "network"
-    description: Optional[str] = None
+    description: str | None = None
     status: str = "Active"
 
 
@@ -43,8 +42,28 @@ class IPAddress(DiffSyncModel):
     prefix_length: int
     namespace: str
     status: str = "Active"
-    description: Optional[str] = None
+    description: str | None = None
     dns_name: str = ""
+
+
+class IPAddressRange(DiffSyncModel):
+    """DHCP Range synced from a BloxOne Range.
+
+    Matches Nautobot's `ipam.IPAddressRange` uniqueness, which is keyed by the
+    (auto-resolved) parent Prefix and `start_address` - `namespace` stands in for the
+    parent here, same as on `IPAddress`.
+    """
+
+    _modelname = "ipaddressrange"
+    _identifiers = ("start_address", "namespace")
+    _attributes = ("end_address", "name", "description", "status")
+
+    start_address: str
+    end_address: str
+    namespace: str
+    name: str = ""
+    description: str | None = None
+    status: str = "Active"
 
 
 class DnsZone(DiffSyncModel):
@@ -52,10 +71,15 @@ class DnsZone(DiffSyncModel):
 
     _modelname = "dnszone"
     _identifiers = ("name",)
-    _attributes = ("ttl",)
+    # view is tracked as an attribute, not an identifier, so this stays correct for the common
+    # single-view setup (see SSOTInfobloxUDDIConfig.dns_view); if synced unscoped across multiple
+    # views with colliding zone names, only one zone per name is represented (same limitation as
+    # pre-existing single-key identity), but it is still tied to the correct DNSView.
+    _attributes = ("ttl", "view")
 
     name: str
-    ttl: Optional[int] = None
+    ttl: int | None = None
+    view: str = ""
 
 
 class DnsARecord(DiffSyncModel):
@@ -68,7 +92,7 @@ class DnsARecord(DiffSyncModel):
     name: str
     zone: str
     address: str
-    ttl: Optional[int] = None
+    ttl: int | None = None
 
 
 class DnsAaaaRecord(DiffSyncModel):
@@ -81,7 +105,7 @@ class DnsAaaaRecord(DiffSyncModel):
     name: str
     zone: str
     address: str
-    ttl: Optional[int] = None
+    ttl: int | None = None
 
 
 class DnsCnameRecord(DiffSyncModel):
@@ -97,7 +121,7 @@ class DnsCnameRecord(DiffSyncModel):
     name: str
     zone: str
     alias: str
-    ttl: Optional[int] = None
+    ttl: int | None = None
 
 
 class DnsPtrRecord(DiffSyncModel):
@@ -113,4 +137,4 @@ class DnsPtrRecord(DiffSyncModel):
     name: str
     zone: str
     ptrdname: str
-    ttl: Optional[int] = None
+    ttl: int | None = None
