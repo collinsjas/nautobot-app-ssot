@@ -263,6 +263,13 @@ failing that from the interface's name: `Vlan100` is virtual and `Port-channel1`
 not a media type came with them. The media type wins where it resolves, since what the platform
 reports about a port is better evidence than what somebody called it.
 
+A logical interface with no port behind it is virtual by name, since IP Fabric reports no media type
+for one: Junos tunnel and service interfaces numbered by slot, such as `gr-0/0/0`, `lt-0/0/0` and
+`sp-0/0/0`; Junos pseudo-interfaces such as `st0`, `fti0`, `irb`, `vlan`, `gre`, `ipip` and `lsi`;
+`Null0`; and Linux `tun` devices. One Nautobot already holds as `1000base-t` or any other type is
+updated to virtual, and a Cable on it is handled as for
+[a subinterface that holds a Cable](#a-subinterface-that-holds-a-cable).
+
 **Where neither resolves, no type is reported and the one Nautobot holds is left alone.** A
 configured default written in that position would be indistinguishable from a type genuinely
 resolved to that value, and would overwrite a type set by hand or by another source on every run. As
@@ -445,7 +452,7 @@ on the name.
 
 ## Interface Addresses
 
-An Interface carries every address IP Fabric reports for it, each synced as its own IP Address in Nautobot. Three tables are read: `technology.addressing.managed_ip_ipv4` and `managed_ip_ipv6` for the addresses configured on the interface, and `technology.fhrp.group_members` for FHRP virtual addresses. So a secondary address, an HSRP or VRRP virtual address, and IPv6 alongside IPv4 all reach Nautobot, which is what lets a template render them from Nautobot data.
+An Interface carries every address IP Fabric reports for it, each synced as its own IP Address in Nautobot. Three tables are read: `technology.addressing.managed_ip_ipv4` and `managed_ip_ipv6` for the addresses configured on the interface, and `technology.fhrp.group_state` for FHRP virtual addresses, IPv4 and IPv6. So a secondary address, an HSRP or VRRP virtual address, and IPv6 alongside IPv4 all reach Nautobot, which is what lets a template render them from Nautobot data.
 
 A prefix length is what the sync records, not a dotted netmask, which is what makes an IPv6 address expressible at all: a netmask is undefined above a length of 32. Each address is diffed on its own. An Interface gaining a third address reports that one address rather than its whole set, one IP Fabric stops reporting is removed without touching the rest, and the job log names the address that moved. An address is matched on its host within its Interface, not on its address, because the mask is the attribute IP Fabric can change for an address it keeps reporting; matching on the mask as well would report a corrected mask as one address replacing another.
 
@@ -463,7 +470,7 @@ The exception is a management address reached through NAT, which belongs to no i
 
 A virtual address has no subnet of its own in IP Fabric's FHRP tables, so it resolves at the third rung described under [Subnet Masks](#subnet-masks): the subnet of whichever of its Interface's addresses contains it. Where none covers it, it is withheld exactly as any other address with no usable subnet is, and counted in the same summary; it is not written under a guessed mask.
 
-The column carrying the virtual address is not the same in every IP Fabric release, and IP Fabric reports a table's columns from the appliance rather than declaring them, so the sync looks for it under `vip`, `virtualIp` and `virtualIP`. A group member carrying none of those is reported, so a release that names it differently shows up in the job log rather than silently syncing nothing.
+The virtual addresses come from IP Fabric's FHRP group state table, which has a row for each device and Interface in a group. The primary virtual address, IPv4 or IPv6, and any secondary virtual addresses are added to the Interface on every device that is a member of the group, so the active and standby routers both carry them.
 
 ## Subnet Masks
 
