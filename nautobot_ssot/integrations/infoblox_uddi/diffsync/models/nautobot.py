@@ -151,7 +151,8 @@ class DnsZone(base.DnsZone):
             if attrs.get("ttl") is not None:
                 defaults["ttl"] = attrs["ttl"]
             try:
-                OrmDNSZone.objects.get_or_create(name=ids["name"], defaults=defaults)
+                zone, _ = OrmDNSZone.objects.get_or_create(name=ids["name"], defaults=defaults)
+                zone.tags.add(adapter.sync_tag)
             except Exception as error:  # pylint: disable=broad-except
                 # Guard against unexpected AuthZone name collisions within the same DNS View
                 # rather than letting an unhandled IntegrityError abort the whole sync.
@@ -206,7 +207,10 @@ class DnsARecord(base.DnsARecord):
                 if attrs.get("ttl") is not None:
                     defaults["_ttl"] = attrs["ttl"]
                 try:
-                    ARecord.objects.get_or_create(name=ids["name"], zone=zone, ip_address=ip_address, defaults=defaults)
+                    record, _ = ARecord.objects.get_or_create(
+                        name=ids["name"], zone=zone, ip_address=ip_address, defaults=defaults
+                    )
+                    record.tags.add(adapter.sync_tag)
                 except Exception as error:  # pylint: disable=broad-except
                     adapter.job.logger.error("Failed to create DNS A record %s: %s. Skipping.", ids["name"], error)
         else:
@@ -250,9 +254,10 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
                 if attrs.get("ttl") is not None:
                     defaults["_ttl"] = attrs["ttl"]
                 try:
-                    AAAARecord.objects.get_or_create(
+                    record, _ = AAAARecord.objects.get_or_create(
                         name=ids["name"], zone=zone, ip_address=ip_address, defaults=defaults
                     )
+                    record.tags.add(adapter.sync_tag)
                 except Exception as error:  # pylint: disable=broad-except
                     adapter.job.logger.error("Failed to create DNS AAAA record %s: %s. Skipping.", ids["name"], error)
         else:
@@ -290,11 +295,14 @@ class DnsCnameRecord(base.DnsCnameRecord):
 
             zone = DNSZone.objects.filter(name=ids["zone"]).first()
             if zone:
-                defaults = {"alias": attrs.get("alias")}
+                defaults = {}
                 if attrs.get("ttl") is not None:
                     defaults["_ttl"] = attrs["ttl"]
                 try:
-                    CNAMERecord.objects.get_or_create(name=ids["name"], zone=zone, defaults=defaults)
+                    record, _ = CNAMERecord.objects.get_or_create(
+                        name=ids["name"], alias=ids["alias"], zone=zone, defaults=defaults
+                    )
+                    record.tags.add(adapter.sync_tag)
                 except Exception as error:  # pylint: disable=broad-except
                     adapter.job.logger.error("Failed to create DNS CNAME record %s: %s. Skipping.", ids["name"], error)
         else:
@@ -302,7 +310,7 @@ class DnsCnameRecord(base.DnsCnameRecord):
                 "nautobot-dns-models not installed; skipping CNAME record %s -> %s (not representable "
                 "via IPAddress.dns_name).",
                 ids["name"],
-                attrs.get("alias"),
+                ids["alias"],
             )
         return super().create(adapter, ids, attrs)
 
@@ -311,7 +319,7 @@ class DnsCnameRecord(base.DnsCnameRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import CNAMERecord  # pylint: disable=import-outside-toplevel
 
-            record = CNAMERecord.objects.filter(name=self.name, zone__name=self.zone).first()
+            record = CNAMERecord.objects.filter(name=self.name, alias=self.alias, zone__name=self.zone).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
         return super().delete()
@@ -331,11 +339,14 @@ class DnsPtrRecord(base.DnsPtrRecord):
 
             zone = DNSZone.objects.filter(name=ids["zone"]).first()
             if zone:
-                defaults = {"ptrdname": attrs.get("ptrdname")}
+                defaults = {}
                 if attrs.get("ttl") is not None:
                     defaults["_ttl"] = attrs["ttl"]
                 try:
-                    PTRRecord.objects.get_or_create(name=ids["name"], zone=zone, defaults=defaults)
+                    record, _ = PTRRecord.objects.get_or_create(
+                        name=ids["name"], ptrdname=ids["ptrdname"], zone=zone, defaults=defaults
+                    )
+                    record.tags.add(adapter.sync_tag)
                 except Exception as error:  # pylint: disable=broad-except
                     adapter.job.logger.error("Failed to create DNS PTR record %s: %s. Skipping.", ids["name"], error)
         else:
@@ -349,7 +360,7 @@ class DnsPtrRecord(base.DnsPtrRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import PTRRecord  # pylint: disable=import-outside-toplevel
 
-            record = PTRRecord.objects.filter(name=self.name, zone__name=self.zone).first()
+            record = PTRRecord.objects.filter(name=self.name, ptrdname=self.ptrdname, zone__name=self.zone).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
         return super().delete()

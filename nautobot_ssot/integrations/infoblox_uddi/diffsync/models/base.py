@@ -88,8 +88,11 @@ class DnsCnameRecord(DiffSyncModel):
     """DNS CNAME record synced from a BloxOne Record (type=CNAME)."""
 
     _modelname = "dnscnamerecord"
-    _identifiers = ("name", "zone")
-    _attributes = ("alias", "ttl")
+    # alias is part of the identifier, matching nautobot-dns-models' unique_together
+    # (name, alias, zone) - two records sharing (name, zone) but a different alias are
+    # distinct, real records, not duplicates.
+    _identifiers = ("name", "zone", "alias")
+    _attributes = ("ttl",)
 
     name: str
     zone: str
@@ -101,8 +104,11 @@ class DnsPtrRecord(DiffSyncModel):
     """DNS PTR record synced from a BloxOne Record (type=PTR)."""
 
     _modelname = "dnsptrrecord"
-    _identifiers = ("name", "zone")
-    _attributes = ("ptrdname", "ttl")
+    # ptrdname is part of the identifier, matching nautobot-dns-models' unique_together
+    # (name, ptrdname, zone) - two records sharing (name, zone) but a different ptrdname
+    # are distinct, real records, not duplicates.
+    _identifiers = ("name", "zone", "ptrdname")
+    _attributes = ("ttl",)
 
     name: str
     zone: str
