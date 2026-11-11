@@ -33,7 +33,7 @@ This integration currently supports mapping a single configured BloxOne IP Space
 
 The regular sync only manages Nautobot objects tagged `SSoT Synced from Infoblox Universal DDI`. To adopt existing records, run the **Infoblox Universal DDI Brownfield Adoption** job with the configuration whose IP Space and Namespace define the intended ownership scope.
 
-The job fetches the currently configured Infoblox data and reports existing Nautobot objects with matching identities. It is preview-only by default. Review the matching objects first, then run it again with **Apply tags** enabled to mark those records as managed by the integration. Objects that do not match Infoblox are not tagged. When `nautobot-dns-models` is installed, DNS records whose zone name appears in multiple Infoblox DNS Views are excluded from adoption to avoid claiming an ambiguous record.
+The job fetches the currently configured Infoblox data and reports existing Nautobot objects with matching identities. It is preview-only by default. Review the matching objects first, then run it again with **Apply tags** enabled to mark those records as managed by the integration. Objects that do not match Infoblox are not tagged. When `nautobot-dns-models` is installed, DNS zones and records are matched per DNS View, so a zone or record in one view is never adopted on the strength of a same-named object in another view.
 
 Infoblox Universal DDI is treated as the source of truth for everything it imports:
 

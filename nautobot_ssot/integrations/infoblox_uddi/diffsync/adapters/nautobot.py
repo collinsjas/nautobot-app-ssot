@@ -99,7 +99,7 @@ class NautobotAdapter(DiffSync):
             return
         from nautobot_dns_models.models import DNSZone  # pylint: disable=import-outside-toplevel
 
-        for zone in DNSZone.objects.filter(tags=self.sync_tag):
+        for zone in DNSZone.objects.select_related("dns_view").filter(tags=self.sync_tag):
             new_zone = self.dnszone(name=zone.name, ttl=zone.ttl, view=zone.dns_view.name)
             try:
                 self.add(new_zone)
@@ -117,33 +117,49 @@ class NautobotAdapter(DiffSync):
             PTRRecord,
         )
 
-        for record in ARecord.objects.filter(tags=self.sync_tag):
+        for record in ARecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
             new_record = self.dnsarecord(
-                name=record.name, zone=record.zone.name, address=str(record.ip_address.host), ttl=record.ttl
+                name=record.name,
+                zone=record.zone.name,
+                view=record.zone.dns_view.name,
+                address=str(record.ip_address.host),
+                ttl=record.ttl,
             )
             try:
                 self.add(new_record)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate DNS A record found: {new_record}.")
-        for record in AAAARecord.objects.filter(tags=self.sync_tag):
+        for record in AAAARecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
             new_record = self.dnsaaaarecord(
-                name=record.name, zone=record.zone.name, address=str(record.ip_address.host), ttl=record.ttl
+                name=record.name,
+                zone=record.zone.name,
+                view=record.zone.dns_view.name,
+                address=str(record.ip_address.host),
+                ttl=record.ttl,
             )
             try:
                 self.add(new_record)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate DNS AAAA record found: {new_record}.")
-        for record in CNAMERecord.objects.filter(tags=self.sync_tag):
+        for record in CNAMERecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
             new_record = self.dnscnamerecord(
-                name=record.name, zone=record.zone.name, alias=record.alias, ttl=record.ttl
+                name=record.name,
+                zone=record.zone.name,
+                view=record.zone.dns_view.name,
+                alias=record.alias,
+                ttl=record.ttl,
             )
             try:
                 self.add(new_record)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate DNS CNAME record found: {new_record}.")
-        for record in PTRRecord.objects.filter(tags=self.sync_tag):
+        for record in PTRRecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
             new_record = self.dnsptrrecord(
-                name=record.name, zone=record.zone.name, ptrdname=record.ptrdname, ttl=record.ttl
+                name=record.name,
+                zone=record.zone.name,
+                view=record.zone.dns_view.name,
+                ptrdname=record.ptrdname,
+                ttl=record.ttl,
             )
             try:
                 self.add(new_record)

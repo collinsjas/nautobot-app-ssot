@@ -19,7 +19,6 @@ class SSOTInfobloxUDDIConfigTable(BaseTable):
     import_ip_ranges = BooleanColumn(orderable=False)
     import_dns_zones = BooleanColumn(orderable=False)
     import_dns_records = BooleanColumn(orderable=False)
-    dns_view = tables.Column()
     safe_delete_mode = BooleanColumn(orderable=False)
     job_enabled = BooleanColumn(orderable=False)
     actions = ButtonsColumn(SSOTInfobloxUDDIConfig, buttons=("changelog", "edit", "delete"))
@@ -39,7 +38,6 @@ class SSOTInfobloxUDDIConfigTable(BaseTable):
             "import_ip_ranges",
             "import_dns_zones",
             "import_dns_records",
-            "dns_view",
             "safe_delete_mode",
             "job_enabled",
         )

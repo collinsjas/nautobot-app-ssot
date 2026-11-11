@@ -240,7 +240,7 @@ class DnsZone(base.DnsZone):
             # dns_view is part of the real (name, dns_view) uniqueness - included in the lookup,
             # not just defaults, so distinct per-view zones are matched/created correctly.
             lookup = {"name": ids["name"]}
-            dns_view = _get_or_create_dns_view(attrs.get("view"))
+            dns_view = _get_or_create_dns_view(ids["view"])
             if dns_view is not None:
                 lookup["dns_view"] = dns_view
             try:
@@ -261,15 +261,12 @@ class DnsZone(base.DnsZone):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = OrmDNSZone.objects.filter(name=self.name).first()
+            zone = OrmDNSZone.objects.filter(name=self.name, dns_view__name=self.view).first()
             if zone:
                 update_fields = []
                 if attrs.get("ttl") is not None and zone.ttl != attrs["ttl"]:
                     zone.ttl = attrs["ttl"]
                     update_fields.append("ttl")
-                if attrs.get("view") and zone.dns_view.name != attrs["view"]:
-                    zone.dns_view = _get_or_create_dns_view(attrs["view"])
-                    update_fields.append("dns_view")
                 if update_fields:
                     # Bypass full_clean(): pre-existing zones may carry legacy required-field
                     # gaps (soa_mname/soa_rname/filename) or wire-format-invalid (trailing-dot)
@@ -282,7 +279,7 @@ class DnsZone(base.DnsZone):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = OrmDNSZone.objects.filter(name=self.name).first()
+            zone = OrmDNSZone.objects.filter(name=self.name, dns_view__name=self.view).first()
             if zone:
                 _safe_delete_or_hard_delete(zone, self.adapter.config.safe_delete_mode)
         return super().delete()
@@ -301,7 +298,7 @@ class DnsARecord(base.DnsARecord):
             from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
             from nautobot_dns_models.models import ARecord, DNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"]).first()
+            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
             ip_address = OrmIPAddress.objects.filter(
                 host=ids["address"], parent__namespace_id=adapter.namespace_id
             ).first()
@@ -329,7 +326,9 @@ class DnsARecord(base.DnsARecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import ARecord  # pylint: disable=import-outside-toplevel
 
-            record = ARecord.objects.filter(name=self.name, zone__name=self.zone, ip_address__host=self.address).first()
+            record = ARecord.objects.filter(
+                name=self.name, zone__name=self.zone, zone__dns_view__name=self.view, ip_address__host=self.address
+            ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
         return super().delete()
@@ -348,7 +347,7 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
             from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
             from nautobot_dns_models.models import AAAARecord, DNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"]).first()
+            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
             ip_address = OrmIPAddress.objects.filter(
                 host=ids["address"], parent__namespace_id=adapter.namespace_id
             ).first()
@@ -377,7 +376,7 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
             from nautobot_dns_models.models import AAAARecord  # pylint: disable=import-outside-toplevel
 
             record = AAAARecord.objects.filter(
-                name=self.name, zone__name=self.zone, ip_address__host=self.address
+                name=self.name, zone__name=self.zone, zone__dns_view__name=self.view, ip_address__host=self.address
             ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
@@ -396,7 +395,7 @@ class DnsCnameRecord(base.DnsCnameRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import CNAMERecord, DNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"]).first()
+            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
             if zone:
                 defaults = {}
                 if attrs.get("ttl") is not None:
@@ -422,7 +421,9 @@ class DnsCnameRecord(base.DnsCnameRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import CNAMERecord  # pylint: disable=import-outside-toplevel
 
-            record = CNAMERecord.objects.filter(name=self.name, alias=self.alias, zone__name=self.zone).first()
+            record = CNAMERecord.objects.filter(
+                name=self.name, alias=self.alias, zone__name=self.zone, zone__dns_view__name=self.view
+            ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
         return super().delete()
@@ -440,7 +441,7 @@ class DnsPtrRecord(base.DnsPtrRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone, PTRRecord  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"]).first()
+            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
             if zone:
                 defaults = {}
                 if attrs.get("ttl") is not None:
@@ -463,7 +464,9 @@ class DnsPtrRecord(base.DnsPtrRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import PTRRecord  # pylint: disable=import-outside-toplevel
 
-            record = PTRRecord.objects.filter(name=self.name, ptrdname=self.ptrdname, zone__name=self.zone).first()
+            record = PTRRecord.objects.filter(
+                name=self.name, ptrdname=self.ptrdname, zone__name=self.zone, zone__dns_view__name=self.view
+            ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
         return super().delete()

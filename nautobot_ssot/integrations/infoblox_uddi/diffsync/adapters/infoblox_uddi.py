@@ -44,8 +44,8 @@ class InfobloxUDDIAdapter(DiffSync):
         self.conn = conn
         self.config = config
         self._ip_space_id = None
-        self._dns_view_id = False
         self._view_names_by_id = None
+        self._unresolved_view_zones = set()
         self._subnet_networks = []
 
     def _get_ip_space_id(self) -> str:
@@ -57,24 +57,25 @@ class InfobloxUDDIAdapter(DiffSync):
             self._ip_space_id = ip_space.id
         return self._ip_space_id
 
-    def _get_dns_view_id(self) -> str | None:
-        """Resolve and cache the configured DNS View's BloxOne id, or None to sync all views."""
-        if self._dns_view_id is False:
-            dns_view_name = getattr(self.config, "dns_view", "") or ""
-            if not dns_view_name:
-                self._dns_view_id = None
-            else:
-                dns_view = self.conn.get_dns_view(dns_view_name)
-                if dns_view is None:
-                    raise ValueError(f"DNS View '{dns_view_name}' not found in Infoblox Universal DDI.")
-                self._dns_view_id = dns_view.id
-        return self._dns_view_id
-
     def _get_view_name(self, view_id: str | None) -> str:
         """Resolve a BloxOne DNS View id to its name, caching the full id->name map."""
         if self._view_names_by_id is None:
             self._view_names_by_id = {view.id: view.name for view in self.conn.list_dns_views()}
         return self._view_names_by_id.get(view_id, "")
+
+    def _get_zone_view_name(self, zone) -> str:
+        """Return the DNS View name for a BloxOne zone, warning once per zone if it can't be resolved."""
+        view_id = getattr(zone, "view", None)
+        view_name = self._get_view_name(view_id)
+        if view_name:
+            self.job.logger.debug(f"DNS Zone {zone.fqdn} (view id {view_id}) belongs to DNS View '{view_name}'.")
+        elif zone.id not in self._unresolved_view_zones:
+            self._unresolved_view_zones.add(zone.id)
+            self.job.logger.warning(
+                f"Could not resolve the DNS View of zone {zone.fqdn} (view id {view_id!r}); "
+                "its records will not match any Nautobot zone."
+            )
+        return view_name
 
     def load_prefixes(self):
         """Load Prefixes (AddressBlocks as containers, Subnets as networks) from BloxOne.
@@ -167,11 +168,9 @@ class InfobloxUDDIAdapter(DiffSync):
                 self.job.logger.warning(f"Duplicate IP Address Range found: {new_range}.")
 
     def load_dns_zones(self):
-        """Load DNS Zones from BloxOne, scoped to the configured DNS View if set."""
-        for zone in self.conn.list_dns_zones(view_id=self._get_dns_view_id()):
-            new_zone = self.dnszone(
-                name=zone.fqdn, ttl=getattr(zone, "ttl", None), view=self._get_view_name(getattr(zone, "view", None))
-            )
+        """Load DNS Zones from every DNS View in BloxOne."""
+        for zone in self.conn.list_dns_zones():
+            new_zone = self.dnszone(name=zone.fqdn, ttl=getattr(zone, "ttl", None), view=self._get_zone_view_name(zone))
             try:
                 self.add(new_zone)
             except ObjectAlreadyExists:
@@ -185,25 +184,26 @@ class InfobloxUDDIAdapter(DiffSync):
             "CNAME": self.dnscnamerecord,
             "PTR": self.dnsptrrecord,
         }
-        for zone in self.conn.list_dns_zones(view_id=self._get_dns_view_id()):
+        for zone in self.conn.list_dns_zones():
             for record_type in self.config.dns_record_types:
                 model_cls = record_type_map.get(record_type)
                 if model_cls is None:
                     continue
+                view = self._get_zone_view_name(zone)
                 for record in self.conn.list_dns_records(zone.id, record_type=record_type):
-                    self._add_dns_record(model_cls, record_type, zone.fqdn, record)
+                    self._add_dns_record(model_cls, record_type, zone.fqdn, view, record)
 
-    def _add_dns_record(self, model_cls, record_type, zone_fqdn, record):
+    def _add_dns_record(self, model_cls, record_type, zone_fqdn, view, record):
         """Build and add a single DNS record DiffSyncModel instance."""
         rdata = getattr(record, "rdata", {}) or {}
         name = getattr(record, "name_in_zone", "") or ""
         ttl = getattr(record, "ttl", None)
         if record_type in ("A", "AAAA"):
-            new_record = model_cls(name=name, zone=zone_fqdn, address=rdata.get("address"), ttl=ttl)
+            new_record = model_cls(name=name, zone=zone_fqdn, view=view, address=rdata.get("address"), ttl=ttl)
         elif record_type == "CNAME":
-            new_record = model_cls(name=name, zone=zone_fqdn, alias=rdata.get("cname"), ttl=ttl)
+            new_record = model_cls(name=name, zone=zone_fqdn, view=view, alias=rdata.get("cname"), ttl=ttl)
         elif record_type == "PTR":
-            new_record = model_cls(name=name, zone=zone_fqdn, ptrdname=rdata.get("dname"), ttl=ttl)
+            new_record = model_cls(name=name, zone=zone_fqdn, view=view, ptrdname=rdata.get("dname"), ttl=ttl)
         else:
             return
         try:

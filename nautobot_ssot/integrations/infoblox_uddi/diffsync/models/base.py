@@ -8,7 +8,6 @@ needed on that side. The Nautobot-side adapter uses the subclasses defined in
 DNS fallback behavior).
 """
 
-
 from diffsync import DiffSyncModel
 
 
@@ -70,27 +69,25 @@ class DnsZone(DiffSyncModel):
     """DNS Zone synced from a BloxOne AuthZone."""
 
     _modelname = "dnszone"
-    _identifiers = ("name",)
-    # view is tracked as an attribute, not an identifier, so this stays correct for the common
-    # single-view setup (see SSOTInfobloxUDDIConfig.dns_view); if synced unscoped across multiple
-    # views with colliding zone names, only one zone per name is represented (same limitation as
-    # pre-existing single-key identity), but it is still tied to the correct DNSView.
-    _attributes = ("ttl", "view")
+    # A zone is unique per (name, view): the same zone name can exist in several DNS Views.
+    _identifiers = ("name", "view")
+    _attributes = ("ttl",)
 
     name: str
-    ttl: int | None = None
     view: str = ""
+    ttl: int | None = None
 
 
 class DnsARecord(DiffSyncModel):
     """DNS A record synced from a BloxOne Record (type=A)."""
 
     _modelname = "dnsarecord"
-    _identifiers = ("name", "zone", "address")
+    _identifiers = ("name", "zone", "view", "address")
     _attributes = ("ttl",)
 
     name: str
     zone: str
+    view: str
     address: str
     ttl: int | None = None
 
@@ -99,11 +96,12 @@ class DnsAaaaRecord(DiffSyncModel):
     """DNS AAAA record synced from a BloxOne Record (type=AAAA)."""
 
     _modelname = "dnsaaaarecord"
-    _identifiers = ("name", "zone", "address")
+    _identifiers = ("name", "zone", "view", "address")
     _attributes = ("ttl",)
 
     name: str
     zone: str
+    view: str
     address: str
     ttl: int | None = None
 
@@ -115,11 +113,12 @@ class DnsCnameRecord(DiffSyncModel):
     # alias is part of the identifier, matching nautobot-dns-models' unique_together
     # (name, alias, zone) - two records sharing (name, zone) but a different alias are
     # distinct, real records, not duplicates.
-    _identifiers = ("name", "zone", "alias")
+    _identifiers = ("name", "zone", "view", "alias")
     _attributes = ("ttl",)
 
     name: str
     zone: str
+    view: str
     alias: str
     ttl: int | None = None
 
@@ -131,10 +130,11 @@ class DnsPtrRecord(DiffSyncModel):
     # ptrdname is part of the identifier, matching nautobot-dns-models' unique_together
     # (name, ptrdname, zone) - two records sharing (name, zone) but a different ptrdname
     # are distinct, real records, not duplicates.
-    _identifiers = ("name", "zone", "ptrdname")
+    _identifiers = ("name", "zone", "view", "ptrdname")
     _attributes = ("ttl",)
 
     name: str
     zone: str
+    view: str
     ptrdname: str
     ttl: int | None = None

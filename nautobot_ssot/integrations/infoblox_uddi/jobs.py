@@ -1,5 +1,7 @@
 """Jobs for Infoblox Universal DDI integration with SSoT app."""
 
+import traceback
+
 from diffsync.enum import DiffSyncFlags
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
@@ -91,6 +93,15 @@ class InfobloxUDDIDataSource(DataSource):
 
     def load_source_adapter(self):
         """Load Infoblox Universal DDI data."""
+        try:
+            self._load_source_adapter()
+        except Exception:
+            # The parallel loader only reports the exception message, so log the traceback here.
+            self.logger.error("Infoblox Universal DDI load failed:\n%s", traceback.format_exc())
+            raise
+
+    def _load_source_adapter(self):
+        """Connect to Infoblox Universal DDI and load its data."""
         self.logger.info("Connecting to Infoblox Universal DDI...")
         if self.debug:
             self.logger.debug("Debug Test")
@@ -102,6 +113,14 @@ class InfobloxUDDIDataSource(DataSource):
 
     def load_target_adapter(self):
         """Load Nautobot data."""
+        try:
+            self._load_target_adapter()
+        except Exception:
+            self.logger.error("Nautobot load failed:\n%s", traceback.format_exc())
+            raise
+
+    def _load_target_adapter(self):
+        """Connect to Nautobot and load its data."""
         self.logger.info("Connecting to Nautobot...")
         self.target_adapter = nautobot.NautobotAdapter(job=self, sync=self.sync, config=self.config)
         self.logger.info("Loading data from Nautobot...")
@@ -271,10 +290,6 @@ class InfobloxUDDIBrownfieldAdoption(Job):
         )
 
         source_zones = list(source_adapter.get_all("dnszone"))
-        zones_by_name = {}
-        for zone in source_zones:
-            zones_by_name.setdefault(zone.name, set()).add(zone.view)
-
         matches = []
         if config.import_dns_zones:
             matches.extend(
@@ -286,38 +301,19 @@ class InfobloxUDDIBrownfieldAdoption(Job):
                 )
             )
 
-        if config.dns_view and not source_zones:
-            zones_by_name = {
-                record.zone: {config.dns_view}
-                for name in (
-                    "dnsarecord",
-                    "dnsaaaarecord",
-                    "dnscnamerecord",
-                    "dnsptrrecord",
-                )
-                for record in source_adapter.get_all(name)
-            }
-
         record_models = (
             ("dnsarecord", ARecord),
             ("dnsaaaarecord", AAAARecord),
             ("dnscnamerecord", CNAMERecord),
             ("dnsptrrecord", PTRRecord),
         )
-        ambiguous_records = False
         for model_name, orm_model in record_models:
             source_records = list(source_adapter.get_all(model_name))
-            source_keys = set()
-            for record in source_records:
-                views = zones_by_name.get(record.zone, set())
-                if len(views) == 1:
-                    view = next(iter(views))
-                    if view:
-                        source_keys.add((*_dns_record_identity(record, model_name, source=True), view))
-                    else:
-                        ambiguous_records = True
-                else:
-                    ambiguous_records = True
+            source_keys = {
+                (*_dns_record_identity(record, model_name, source=True), record.view)
+                for record in source_records
+                if record.view
+            }
 
             related_fields = ("zone", "zone__dns_view")
             if model_name in ("dnsarecord", "dnsaaaarecord"):
@@ -332,11 +328,6 @@ class InfobloxUDDIBrownfieldAdoption(Job):
                     source_keys,
                     lambda obj: (*_dns_record_identity(obj, model_name, source=False), _dns_view_name(obj.zone)),
                 )
-            )
-        if ambiguous_records:
-            self.logger.warning(
-                "Some DNS records were excluded from adoption because their DNS View could not be determined "
-                "unambiguously."
             )
         return matches
 

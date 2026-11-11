@@ -1,0 +1,1 @@
+Changed the Infoblox Universal DDI integration to always sync every DNS View. DNS zones are now identified by name and view, and DNS records are attached to the zone in their own view. The `dns_view` setting was removed from the Infoblox UDDI config (migration `0023`).

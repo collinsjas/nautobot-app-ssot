@@ -13,6 +13,7 @@ def _fake_config(**overrides):
         "default_namespace": SimpleNamespace(name="Global"),
         "import_prefixes": True,
         "import_ip_addresses": True,
+        "import_ip_ranges": False,
         "import_dns_zones": True,
         "import_dns_records": True,
         "dns_record_types": ["A", "AAAA", "CNAME", "PTR"],
@@ -38,7 +39,11 @@ class InfobloxUDDIAdapterTestCase(unittest.TestCase):
             SimpleNamespace(address="10.0.0.5", comment="Server 1"),
         ]
         self.conn.list_dns_zones.return_value = [
-            SimpleNamespace(id="zone/1", fqdn="example.com.", ttl=3600),
+            SimpleNamespace(id="zone/1", fqdn="example.com.", ttl=3600, view="view/1"),
+        ]
+        self.conn.list_dns_views.return_value = [
+            SimpleNamespace(id="view/1", name="default"),
+            SimpleNamespace(id="view/2", name="external"),
         ]
 
         def fake_list_dns_records(zone_id, record_type=None):  # pylint: disable=unused-argument
@@ -95,6 +100,34 @@ class InfobloxUDDIAdapterTestCase(unittest.TestCase):
         self.assertEqual(len(zones), 1)
         self.assertEqual(zones[0].name, "example.com.")
         self.assertEqual(zones[0].ttl, 3600)
+        self.assertEqual(zones[0].view, "default")
+        self.conn.list_dns_zones.assert_called_once_with()
+
+    def test_same_zone_in_two_views_is_kept_per_view(self):
+        """Validate a zone name that exists in two DNS Views produces one zone and its records per view."""
+        self.conn.list_dns_zones.return_value = [
+            SimpleNamespace(id="zone/1", fqdn="example.com.", ttl=3600, view="view/1"),
+            SimpleNamespace(id="zone/2", fqdn="example.com.", ttl=600, view="view/2"),
+        ]
+        self.adapter.load_dns_zones()
+        self.adapter.load_dns_records()
+
+        zones = {(z.name, z.view): z.ttl for z in self.adapter.get_all("dnszone")}
+        self.assertEqual(zones, {("example.com.", "default"): 3600, ("example.com.", "external"): 600})
+        a_records = {(r.zone, r.view, r.address) for r in self.adapter.get_all("dnsarecord")}
+        self.assertEqual(a_records, {("example.com.", "default", "10.0.0.5"), ("example.com.", "external", "10.0.0.5")})
+        self.job.logger.warning.assert_not_called()
+
+    def test_unresolved_zone_view_warns_once_per_zone(self):
+        """Validate a zone whose view id is unknown logs one warning, even though zones and records both load."""
+        self.conn.list_dns_zones.return_value = [
+            SimpleNamespace(id="zone/9", fqdn="orphan.example.", ttl=3600, view="view/missing"),
+        ]
+        self.adapter.load_dns_zones()
+        self.adapter.load_dns_records()
+
+        self.assertEqual(self.job.logger.warning.call_count, 1)
+        self.assertIn("orphan.example.", self.job.logger.warning.call_args.args[0])
 
     def test_load_dns_records(self):
         """Validate A and CNAME DNS Records are loaded with the right fields."""
