@@ -29,6 +29,14 @@ DNS sync automatically selects one of two modes at the start of every job run, l
 
 This integration currently supports mapping a single configured BloxOne IP Space to a single configured Nautobot Namespace. Multi-IP-Space mapping is planned for a future phase.
 
+## Brownfield Adoption
+
+The regular sync only manages Nautobot objects tagged `SSoT Synced from Infoblox Universal DDI`. To adopt existing records, run the **Infoblox Universal DDI Brownfield Adoption** job with the configuration whose IP Space and Namespace define the intended ownership scope.
+
+The job fetches the currently configured Infoblox data and reports existing Nautobot objects with matching identities. It is preview-only by default. Review the matching objects first, then run it again with **Apply tags** enabled to mark those records as managed by the integration. Objects that do not match Infoblox are not tagged. When `nautobot-dns-models` is installed, DNS records whose zone name appears in multiple Infoblox DNS Views are excluded from adoption to avoid claiming an ambiguous record.
+
+After tagging, run the regular sync in dry-run mode and review its proposed changes before applying them. The adoption job does not create, update, or delete Nautobot objects; it only applies the sync tag to matching existing objects.
+
 ## Deletion Behavior
 
 By default, objects no longer present in Infoblox Universal DDI are "safe deleted" - marked with a `Deprecated` status and tagged `SSoT Safe Delete` rather than being hard-deleted from Nautobot. This can be disabled per-configuration (`Safe Delete Mode`).

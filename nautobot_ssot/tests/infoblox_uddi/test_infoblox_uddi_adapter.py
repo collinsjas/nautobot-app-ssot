@@ -67,6 +67,21 @@ class InfobloxUDDIAdapterTestCase(unittest.TestCase):
         self.assertEqual(ipaddr.address, "10.0.0.5")
         self.assertEqual(ipaddr.prefix_length, 24)
 
+    def test_load_ip_addresses_reads_dns_names_from_address_objects(self):
+        """Validate DNS names are read from the SDK's attribute-based address objects."""
+        self.conn.list_addresses.return_value = [
+            SimpleNamespace(
+                address="10.0.0.5",
+                comment="Server 1",
+                names=[SimpleNamespace(type="dns", name="host1.example.com")],
+            )
+        ]
+
+        self.adapter.load_ip_addresses()
+
+        ipaddr = list(self.adapter.get_all("ipaddress"))[0]
+        self.assertEqual(ipaddr.dns_name, "host1.example.com")
+
     def test_load_ip_addresses_defaults_to_host_mask_without_subnet(self):
         """Validate IP Addresses default to a host mask when no containing Subnet was loaded."""
         self.adapter.load_ip_addresses()

@@ -128,11 +128,21 @@ class InfobloxUDDIAdapter(DiffSync):
         ip_space_id = self._get_ip_space_id()
         namespace = self.config.default_namespace.name
         for address in self.conn.list_addresses(ip_space_id):
+            name = ""
+            names = getattr(address, "names", None)
+            if isinstance(names, list):
+                for name_type in names:
+                    name_type_kind = getattr(name_type, "type", None)
+                    name_type_name = getattr(name_type, "name", "")
+                    if name_type_kind == "dns":
+                        name = name_type_name
+                        break
             new_ipaddress = self.ipaddress(
                 address=address.address,
                 prefix_length=self._containing_prefix_length(address.address),
                 namespace=namespace,
                 description=getattr(address, "comment", None),
+                dns_name=name,
             )
             try:
                 self.add(new_ipaddress)
