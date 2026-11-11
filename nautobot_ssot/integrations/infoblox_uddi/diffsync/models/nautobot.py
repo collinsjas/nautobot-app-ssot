@@ -8,6 +8,7 @@ are a no-op, and CNAME records are skipped with a warning log.
 """
 
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Q
 from nautobot.extras.models import Status, Tag
 
 from nautobot_ssot.utils import validate_dns_models_installed
@@ -16,6 +17,21 @@ from . import base
 
 SAFE_DELETE_STATUS = "Deprecated"
 SAFE_DELETE_TAG = "SSoT Safe Delete"
+SYNC_TAG_PREFIX = "SSoT Synced from "
+
+
+def get_conflicting_ownership_tags(instance, sync_tag=None):
+    """Return the SSoT ownership tags on `instance` that belong to another system, plus any Safe Delete tag."""
+    tags = instance.tags.filter(Q(name__startswith=SYNC_TAG_PREFIX) | Q(name=SAFE_DELETE_TAG))
+    if sync_tag is not None:
+        tags = tags.exclude(pk=sync_tag.pk)
+    return list(tags)
+
+
+def claim_ownership(instance, sync_tag):
+    """Make `sync_tag` the only SSoT ownership marker on `instance`; Infoblox Universal DDI is the source of truth."""
+    instance.tags.remove(*get_conflicting_ownership_tags(instance, sync_tag))
+    instance.tags.add(sync_tag)
 
 
 def _safe_delete_or_hard_delete(instance, safe_delete_mode):
@@ -104,15 +120,18 @@ class IPAddress(base.IPAddress):
         # IPAddress has no `namespace_id` field; `namespace` is a constructor-only kwarg
         # that auto-resolves `parent` (the containing Prefix) during clean().
         namespace = Namespace.objects.get(pk=adapter.namespace_id)
-        ipaddr = OrmIPAddress(
-            address=f"{ids['address']}/{ids['prefix_length']}",
-            namespace=namespace,
-            description=attrs.get("description") or "",
-            dns_name=attrs.get("dns_name") or "",
-            status=status,
-        )
+        # A host can exist only once per parent Prefix regardless of its mask, so an existing record with a
+        # different mask (or another system's tags) is taken over rather than duplicated.
+        ipaddr = OrmIPAddress.objects.filter(host=ids["address"], parent__namespace=namespace).first()
+        if ipaddr is None:
+            ipaddr = OrmIPAddress(address=f"{ids['address']}/{ids['prefix_length']}", namespace=namespace)
+        else:
+            ipaddr.mask_length = ids["prefix_length"]
+        ipaddr.description = attrs.get("description") or ""
+        ipaddr.dns_name = attrs.get("dns_name") or ""
+        ipaddr.status = status
         ipaddr.validated_save()
-        ipaddr.tags.add(adapter.sync_tag)
+        claim_ownership(ipaddr, adapter.sync_tag)
         return super().create(adapter, ids, attrs)
 
     def update(self, attrs):
@@ -135,9 +154,15 @@ class IPAddress(base.IPAddress):
         """Delete (or safe-delete) an IPAddress from Nautobot."""
         from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
 
-        ipaddr = OrmIPAddress.objects.get(
-            address=f"{self.address}/{self.prefix_length}", parent__namespace_id=self.adapter.namespace_id
-        )
+        ipaddr = OrmIPAddress.objects.filter(
+            host=self.address, mask_length=self.prefix_length, parent__namespace_id=self.adapter.namespace_id
+        ).first()
+        if ipaddr is None:
+            # The same host was re-masked in place by `create()` earlier in this sync.
+            self.adapter.job.logger.warning(
+                f"IP Address {self.address}/{self.prefix_length} no longer exists with that mask; nothing to delete."
+            )
+            return super().delete()
         _safe_delete_or_hard_delete(ipaddr, self.adapter.config.safe_delete_mode)
         return super().delete()
 

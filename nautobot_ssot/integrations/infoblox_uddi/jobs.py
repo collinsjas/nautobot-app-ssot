@@ -15,6 +15,7 @@ from nautobot_ssot.utils import validate_dns_models_installed
 
 from .diffsync.adapters import infoblox_uddi, nautobot
 from .diffsync.adapters.nautobot import SYNC_TAG_NAME
+from .diffsync.models.nautobot import claim_ownership, get_conflicting_ownership_tags
 from .models import SSOTInfobloxUDDIConfig
 from .utils.client import InfobloxUDDIApi
 
@@ -166,6 +167,7 @@ class InfobloxUDDIBrownfieldAdoption(Job):
 
         tag = Tag.objects.filter(name=SYNC_TAG_NAME).first()
         matching = []
+        mask_changes = {}
 
         if config.import_prefixes:
             source_keys = {(item.network, item.namespace) for item in source_adapter.get_all("prefix")}
@@ -179,19 +181,25 @@ class InfobloxUDDIBrownfieldAdoption(Job):
             )
 
         if config.import_ip_addresses:
-            source_keys = {
-                (item.address, item.prefix_length, item.namespace) for item in source_adapter.get_all("ipaddress")
+            source_masks = {
+                (item.address, item.namespace): item.prefix_length for item in source_adapter.get_all("ipaddress")
             }
-            matching.extend(
-                self._get_untagged_matches(
-                    IPAddress.objects.filter(parent__namespace_id=config.default_namespace_id).select_related(
-                        "parent__namespace"
-                    ),
-                    tag,
-                    source_keys,
-                    lambda obj: (str(obj.host), obj.mask_length, obj.parent.namespace.name),
-                )
+            ip_matches = self._get_untagged_matches(
+                IPAddress.objects.filter(parent__namespace_id=config.default_namespace_id).select_related(
+                    "parent__namespace"
+                ),
+                tag,
+                source_masks,
+                lambda obj: (str(obj.host), obj.parent.namespace.name),
             )
+            for ip_address in ip_matches:
+                new_mask = source_masks[(str(ip_address.host), ip_address.parent.namespace.name)]
+                if ip_address.mask_length != new_mask:
+                    mask_changes[ip_address.pk] = new_mask
+                    self.logger.info(
+                        "Mask of %s will be changed to /%d to match Infoblox Universal DDI.", ip_address, new_mask
+                    )
+            matching.extend(ip_matches)
 
         if config.import_ip_ranges:
             source_keys = {(item.start_address, item.namespace) for item in source_adapter.get_all("ipaddressrange")}
@@ -215,6 +223,11 @@ class InfobloxUDDIBrownfieldAdoption(Job):
         )
         for obj in matching:
             self.logger.info("Matching object: %s (%s)", obj, obj._meta.label)
+            other_tags = get_conflicting_ownership_tags(obj, tag)
+            if other_tags:
+                self.logger.info(
+                    "Other SSoT tags on %s will be removed: %s", obj, ", ".join(sorted(t.name for t in other_tags))
+                )
 
         if not apply_tags:
             self.logger.info("Preview only; no tags were applied. Enable 'Apply tags' to adopt these objects.")
@@ -235,7 +248,10 @@ class InfobloxUDDIBrownfieldAdoption(Job):
             content_types = {ContentType.objects.get_for_model(obj, for_concrete_model=False) for obj in matching}
             tag.content_types.add(*content_types)
             for obj in matching:
-                obj.tags.add(tag)
+                if obj.pk in mask_changes:
+                    obj.mask_length = mask_changes[obj.pk]
+                    obj.validated_save()
+                claim_ownership(obj, tag)
         self.logger.info("Applied the Infoblox SSoT tag to %d matching Nautobot objects.", len(matching))
 
     def _get_untagged_matches(self, queryset, tag, source_keys, key_function):

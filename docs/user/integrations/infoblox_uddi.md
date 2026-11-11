@@ -35,6 +35,12 @@ The regular sync only manages Nautobot objects tagged `SSoT Synced from Infoblox
 
 The job fetches the currently configured Infoblox data and reports existing Nautobot objects with matching identities. It is preview-only by default. Review the matching objects first, then run it again with **Apply tags** enabled to mark those records as managed by the integration. Objects that do not match Infoblox are not tagged. When `nautobot-dns-models` is installed, DNS records whose zone name appears in multiple Infoblox DNS Views are excluded from adoption to avoid claiming an ambiguous record.
 
+Infoblox Universal DDI is treated as the source of truth for everything it imports:
+
+- IP Addresses are matched on host address and Namespace. If the mask in Nautobot differs from the mask Infoblox reports for the containing subnet, the mask in Nautobot is changed to match.
+- When a record is adopted, tags that mark it as owned by another system (`SSoT Synced from ...`) and the `SSoT Safe Delete` tag are removed, so the Infoblox Universal DDI tag is the only SSoT ownership tag. The preview lists which tags would be removed. Run the sync afterwards to align the status and other attributes.
+- The regular sync applies the same rule when it has to create an IP Address that already exists in the Namespace, for example with another mask or another system's tags: the existing record is updated and taken over instead of causing a duplicate error.
+
 After tagging, run the regular sync in dry-run mode and review its proposed changes before applying them. The adoption job does not create, update, or delete Nautobot objects; it only applies the sync tag to matching existing objects.
 
 ## Deletion Behavior

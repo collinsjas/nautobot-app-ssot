@@ -6,7 +6,7 @@ from unittest.mock import patch
 from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from nautobot.extras.models import ExternalIntegration, Status, Tag
-from nautobot.ipam.models import Namespace, Prefix
+from nautobot.ipam.models import IPAddress, Namespace, Prefix
 
 from nautobot_ssot.integrations.infoblox_uddi import jobs
 from nautobot_ssot.integrations.infoblox_uddi.diffsync.adapters.nautobot import SYNC_TAG_NAME
@@ -84,16 +84,89 @@ class InfobloxUDDIBrownfieldAdoptionRunTest(TestCase):
         patch.object(jobs, "_get_uddi_client_config", return_value={}).start()
         self.api_class = patch.object(jobs, "InfobloxUDDIApi").start()
         adapter_class = patch.object(jobs.infoblox_uddi, "InfobloxUDDIAdapter").start()
-        source_prefixes = [SimpleNamespace(network="10.0.1.0/24", namespace=self.namespace.name)]
-        adapter_class.return_value.get_all.side_effect = lambda model_name: (
-            source_prefixes if model_name == "prefix" else []
-        )
+        self.source_objects = {
+            "prefix": [SimpleNamespace(network="10.0.1.0/24", namespace=self.namespace.name)],
+            "ipaddress": [],
+        }
+        adapter_class.return_value.get_all.side_effect = lambda model_name: self.source_objects.get(model_name, [])
 
     def _create_prefix(self, prefix):
         return Prefix.objects.create(prefix=prefix, namespace=self.namespace, type="network", status=self.status)
 
     def _run_job(self, **kwargs):
         jobs.InfobloxUDDIBrownfieldAdoption().run(config=self.config, **kwargs)
+
+    def _create_other_system_tags(self):
+        prefix_type = ContentType.objects.get_for_model(Prefix)
+        ipfabric_tag, _ = Tag.objects.get_or_create(name="SSoT Synced from IPFabric")
+        safe_delete_tag, _ = Tag.objects.get_or_create(name="SSoT Safe Delete")
+        for other_tag in (ipfabric_tag, safe_delete_tag):
+            other_tag.content_types.add(prefix_type)
+        return ipfabric_tag, safe_delete_tag
+
+    def test_apply_makes_infoblox_the_only_owner(self):
+        """Another system's sync tag and a Safe Delete tag should be removed from adopted objects."""
+        ipfabric_tag, safe_delete_tag = self._create_other_system_tags()
+        self.matching_prefix.tags.add(ipfabric_tag, safe_delete_tag)
+        self.unrelated_prefix.tags.add(ipfabric_tag)
+
+        self._run_job(apply_tags=True)
+
+        sync_tag = Tag.objects.get(name=SYNC_TAG_NAME)
+        self.assertEqual(set(self.matching_prefix.tags.all()), {sync_tag})
+        self.assertEqual(set(self.unrelated_prefix.tags.all()), {ipfabric_tag})
+
+    def test_preview_keeps_other_systems_tags(self):
+        """A preview should leave the tags of other systems untouched."""
+        ipfabric_tag, safe_delete_tag = self._create_other_system_tags()
+        self.matching_prefix.tags.add(ipfabric_tag, safe_delete_tag)
+
+        self._run_job(apply_tags=False)
+
+        self.assertEqual(set(self.matching_prefix.tags.all()), {ipfabric_tag, safe_delete_tag})
+
+    def _create_ip_address(self, address):
+        return IPAddress.objects.create(address=address, namespace=self.namespace, status=self.status)
+
+    def _enable_ip_import(self, source_address, source_prefix_length):
+        self.config.import_ip_addresses = True
+        self.source_objects["ipaddress"] = [
+            SimpleNamespace(address=source_address, prefix_length=source_prefix_length, namespace=self.namespace.name)
+        ]
+
+    def test_apply_corrects_the_mask_to_match_infoblox(self):
+        """An untagged IP Address whose mask differs from Infoblox should be re-masked and adopted."""
+        ip_address = self._create_ip_address("10.0.1.255/32")
+        self._enable_ip_import("10.0.1.255", 24)
+
+        self._run_job(apply_tags=True)
+
+        ip_address.refresh_from_db()
+        self.assertEqual(ip_address.mask_length, 24)
+        self.assertEqual(ip_address.parent, self.matching_prefix)
+        self.assertEqual(list(ip_address.tags.values_list("name", flat=True)), [SYNC_TAG_NAME])
+
+    def test_preview_does_not_change_the_mask(self):
+        """A preview should report a mask change without making it."""
+        ip_address = self._create_ip_address("10.0.1.255/32")
+        self._enable_ip_import("10.0.1.255", 24)
+
+        self._run_job(apply_tags=False)
+
+        ip_address.refresh_from_db()
+        self.assertEqual(ip_address.mask_length, 32)
+        self.assertEqual(ip_address.tags.count(), 0)
+
+    def test_ip_address_outside_infoblox_is_left_alone(self):
+        """An IP Address that Infoblox does not have should not be adopted or re-masked."""
+        ip_address = self._create_ip_address("10.0.1.77/32")
+        self._enable_ip_import("10.0.1.255", 24)
+
+        self._run_job(apply_tags=True)
+
+        ip_address.refresh_from_db()
+        self.assertEqual(ip_address.mask_length, 32)
+        self.assertEqual(ip_address.tags.count(), 0)
 
     def test_preview_makes_no_changes(self):
         """A preview run should neither create the sync tag nor tag any object."""
