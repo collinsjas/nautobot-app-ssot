@@ -242,11 +242,7 @@ class InfobloxUDDIBrownfieldAdoption(Job):
         """Return untagged objects in `queryset` whose identity exists in the source key set."""
         if tag is not None:
             queryset = queryset.exclude(tags=tag)
-        return [
-            obj
-            for obj in queryset.iterator()
-            if key_function(obj) in source_keys
-        ]
+        return [obj for obj in queryset.iterator() if key_function(obj) in source_keys]
 
     def _get_dns_matches(self, source_adapter, tag, config):
         """Find matching DNS objects without adopting same-named zones in a different DNS View."""
