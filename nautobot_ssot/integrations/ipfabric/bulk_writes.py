@@ -37,6 +37,7 @@ from nautobot.ipam.models import (
     VRF,
     IPAddress,
     IPAddressToInterface,
+    PrefixLocationAssignment,
     VLANLocationAssignment,
     VRFDeviceAssignment,
 )
@@ -56,9 +57,11 @@ THROUGH_LEVELS: Tuple[Any, ...] = (
     TaggedItem,
     IPAddressToInterface,
     VLANLocationAssignment,
+    PrefixLocationAssignment,
     VRF.import_targets.through,
     VRF.export_targets.through,
     Interface.tagged_vlans.through,
+    Device.software_image_files.through,
 )
 
 

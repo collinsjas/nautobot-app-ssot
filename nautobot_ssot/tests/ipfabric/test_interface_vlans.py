@@ -20,8 +20,14 @@ from nautobot_ssot.integrations.ipfabric.diffsync.adapter_ipfabric import switch
 from nautobot_ssot.integrations.ipfabric.diffsync.adapter_nautobot import NautobotDiffSync
 from nautobot_ssot.integrations.ipfabric.diffsync.diffsync_models import InterfaceVlan as InterfaceVlanModel
 from nautobot_ssot.integrations.ipfabric.sync_scope import SYNCABLE_OBJECTS, SyncScope
-from nautobot_ssot.integrations.ipfabric.utilities.nbutils import create_interface, create_vlan, set_interface_vlans
+from nautobot_ssot.integrations.ipfabric.utilities.nbutils import (
+    DeviceScope,
+    create_interface,
+    create_vlan,
+    set_interface_vlans,
+)
 from nautobot_ssot.integrations.ipfabric.utilities.utils import job_scoped_cache, parse_vlan_ranges
+from nautobot_ssot.integrations.ipfabric.writers import BatchedWriter, ImmediateWriter
 from nautobot_ssot.tests.ipfabric.job_log import job_log_text, job_logger
 from nautobot_ssot.tests.ipfabric.test_ipfabric_adapter import (
     INTERFACE_FIXTURE,
@@ -135,8 +141,9 @@ class TestWritingInterfaceVlans(_InterfaceVlanTestCase):
             mode=mode,
             untagged_vid=untagged_vid,
             tagged_vids=tagged_vids,
-            tagged_only=False,
+            scope=DeviceScope(),
             logger=logger,
+            writer=ImmediateWriter(),
         )
 
     def test_an_access_port_gets_its_mode_and_untagged_vlan(self):
@@ -451,7 +458,7 @@ class TestInterfaceVlansUnderBulkWriteMode(_InterfaceVlanTestCase):
         create_interface(
             device_obj=self.device,
             interface_details={"name": name, "type": "1000base-t"},
-            pending=pending,
+            writer=BatchedWriter(pending),
         )
         self.assertFalse(
             Interface.objects.filter(device=self.device, name=name).exists(),
@@ -500,7 +507,7 @@ class TestInterfaceVlansUnderBulkWriteMode(_InterfaceVlanTestCase):
             vlan_status="Active",
             location_obj=self.location,
             description="",
-            pending=pending,
+            writer=BatchedWriter(pending),
         )
         self.assertFalse(VLAN.objects.filter(vid=vid).exists(), "The VLAN is meant to be queued, not written.")
         return vlan
@@ -542,8 +549,8 @@ class TestInterfaceVlansUnderBulkWriteMode(_InterfaceVlanTestCase):
             mode=InterfaceModeChoices.MODE_TAGGED,
             untagged_vid=None,
             tagged_vids=[10],
-            tagged_only=False,
-            pending=adapter.pending,
+            scope=DeviceScope(),
+            writer=BatchedWriter(adapter.pending),
         )
         adapter.pending.flush()
 
@@ -567,8 +574,8 @@ class TestInterfaceVlansUnderBulkWriteMode(_InterfaceVlanTestCase):
             mode=InterfaceModeChoices.MODE_TAGGED,
             untagged_vid=None,
             tagged_vids=[10, 20],
-            tagged_only=False,
-            pending=adapter.pending,
+            scope=DeviceScope(),
+            writer=BatchedWriter(adapter.pending),
         )
         adapter.pending.flush()
 
@@ -586,8 +593,8 @@ class TestInterfaceVlansUnderBulkWriteMode(_InterfaceVlanTestCase):
             mode=InterfaceModeChoices.MODE_ACCESS,
             untagged_vid=10,
             tagged_vids=[],
-            tagged_only=False,
-            pending=None,
+            scope=DeviceScope(),
+            writer=ImmediateWriter(),
         )
 
         self.assertFalse(written, "Without the queue there is no Interface to find, which is the bug.")
@@ -600,6 +607,9 @@ class TestTheInterfaceVlanModel(_InterfaceVlanTestCase):
         """Return an InterfaceVlan bound to a stub adapter, as the Nautobot side loads it."""
         adapter = MagicMock()
         adapter.sync_ipfabric_tagged_only = False
+        adapter.device_scope = DeviceScope()
+        adapter.writer = ImmediateWriter()
+        adapter.tenant = None
         adapter.pending = None
         model = InterfaceVlanModel(
             device_name=attrs.pop("device_name", self.device.name),
@@ -637,7 +647,8 @@ class TestTheInterfaceVlanModel(_InterfaceVlanTestCase):
             mode=InterfaceModeChoices.MODE_TAGGED,
             untagged_vid=10,
             tagged_vids=[20],
-            tagged_only=False,
+            scope=DeviceScope(),
+            writer=ImmediateWriter(),
         )
 
         self.model(mode=InterfaceModeChoices.MODE_TAGGED, untagged_vid=10, tagged_vids=[20]).delete()
@@ -763,7 +774,8 @@ class TestLoadingInterfaceVlansThroughLoadData(_InterfaceVlanTestCase):
             mode=InterfaceModeChoices.MODE_ACCESS,
             untagged_vid=10,
             tagged_vids=[],
-            tagged_only=False,
+            scope=DeviceScope(),
+            writer=ImmediateWriter(),
         )
 
         adapter = self.nautobot_adapter(sync_interface_vlans=True)
@@ -790,8 +802,9 @@ class TestWritingInterfaceVlansThatNautobotRefuses(_InterfaceVlanTestCase):
                 mode=InterfaceModeChoices.MODE_ACCESS,
                 untagged_vid=10,
                 tagged_vids=[],
-                tagged_only=False,
+                scope=DeviceScope(),
                 logger=logger,
+                writer=ImmediateWriter(),
             )
 
         self.assertFalse(written, "The caller has to know the Interface does not hold what was asked.")

@@ -22,8 +22,13 @@ from nautobot.extras.models import Role, Status
 from nautobot_ssot.integrations.ipfabric.bulk_writes import PendingWrites
 from nautobot_ssot.integrations.ipfabric.diffsync.diffsync_models import Interface as InterfaceModel
 from nautobot_ssot.integrations.ipfabric.utilities import nbutils
-from nautobot_ssot.integrations.ipfabric.utilities.nbutils import create_interface, resolve_parent_interface
+from nautobot_ssot.integrations.ipfabric.utilities.nbutils import (
+    DeviceScope,
+    create_interface,
+    resolve_parent_interface,
+)
 from nautobot_ssot.integrations.ipfabric.utilities.utils import job_scoped_cache, parent_interface_name
+from nautobot_ssot.integrations.ipfabric.writers import BatchedWriter, ImmediateWriter
 from nautobot_ssot.tests.ipfabric.job_log import job_log_text, job_logger
 from nautobot_ssot.tests.ipfabric.test_ipfabric_adapter import (
     INTERFACE_FIXTURE,
@@ -189,6 +194,9 @@ class TestATunnelUnitThatWasCabledUnderTheDefaultType(TestCase):
         """Drive the update a re-sync makes to the unit, and return the adapter it reported to."""
         adapter = MagicMock()
         adapter.sync_ipfabric_tagged_only = False
+        adapter.device_scope = DeviceScope()
+        adapter.writer = ImmediateWriter()
+        adapter.tenant = None
         adapter.safe_delete_tally = Counter()
         # Held per run on the adapter, so two syncs in one worker cannot share it.
         adapter.safe_delete_mode = safe_delete_mode
@@ -339,6 +347,7 @@ class TestCreatingAnInterfaceThatPointsAtAnother(TestATunnelUnitThatWasCabledUnd
             device_obj=self.device,
             interface_details={"name": "st0.1", "type": InterfaceTypeChoices.TYPE_VIRTUAL, "parent_interface": "st0"},
             logger=MagicMock(),
+            writer=ImmediateWriter(),
         )
 
         created.refresh_from_db()
@@ -351,6 +360,7 @@ class TestCreatingAnInterfaceThatPointsAtAnother(TestATunnelUnitThatWasCabledUnd
             device_obj=self.device,
             interface_details={"name": "st9.0", "type": InterfaceTypeChoices.TYPE_VIRTUAL, "parent_interface": "st9"},
             logger=logger,
+            writer=ImmediateWriter(),
         )
 
         self.assertIsNotNone(created, "A port nothing reported must not stop the Interface being written.")
@@ -361,10 +371,12 @@ class TestCreatingAnInterfaceThatPointsAtAnother(TestATunnelUnitThatWasCabledUnd
         """Bulk Write Mode: the port has no row yet, but already has the primary key to point at."""
         pending = PendingWrites(job_logger())
         port = create_interface(
-            device_obj=self.device, interface_details={"name": "ge-0/0/5", "type": "1000base-t"}, pending=pending
+            device_obj=self.device,
+            interface_details={"name": "ge-0/0/5", "type": "1000base-t"},
+            writer=BatchedWriter(pending),
         )
 
-        self.assertIs(port, resolve_parent_interface(self.device, "ge-0/0/5", pending=pending))
+        self.assertIs(port, resolve_parent_interface(self.device, "ge-0/0/5", writer=BatchedWriter(pending)))
 
     def test_nothing_is_read_back_for_a_device_that_is_itself_queued(self):
         """A Device only queued holds no rows, so asking the database about it would be wrong."""
@@ -376,7 +388,9 @@ class TestCreatingAnInterfaceThatPointsAtAnother(TestATunnelUnitThatWasCabledUnd
             device_type=self.device.device_type,
         )
 
-        self.assertIsNone(resolve_parent_interface(queued_device, "ge-0/0/0", pending=PendingWrites(job_logger())))
+        self.assertIsNone(
+            resolve_parent_interface(queued_device, "ge-0/0/0", writer=BatchedWriter(PendingWrites(job_logger())))
+        )
 
 
 class TestWhenNautobotRefusesTheWrite(TestATunnelUnitThatWasCabledUnderTheDefaultType):
@@ -394,6 +408,9 @@ class TestWhenNautobotRefusesTheWrite(TestATunnelUnitThatWasCabledUnderTheDefaul
         """What a manual run needed to tell a refused type from a refused relation."""
         adapter = MagicMock()
         adapter.sync_ipfabric_tagged_only = False
+        adapter.device_scope = DeviceScope()
+        adapter.writer = ImmediateWriter()
+        adapter.tenant = None
         model = InterfaceModel(name=self.port.name, device_name=self.device.name, status="Active")
         model.adapter = adapter
 

@@ -75,6 +75,11 @@ PLUGINS_CONFIG = {
 | `ipfabric_safe_delete_vlan_status`      | The status that is set for a VLAN when the `Safe Delete Mode` flag is set in the Job.                                                                                                         | `Deprecated`        |
 | `ipfabric_safe_delete_ipaddress_status` | The status that is set for an IP Address when the `Safe Delete Mode` flag is set in the Job.                                                                                                  | `Deprecated`        |
 | `ipfabric_safe_delete_cable_status`     | The status that is set for a Cable when the `Safe Delete Mode` flag is set in the Job.                                                                                                        | `Decommissioning`   |
+| `ipfabric_safe_delete_prefix_status`    | The status that is set for a Prefix when the `Safe Delete Mode` flag is set in the Job.                                                                                                       | `Deprecated`        |
+| `ipfabric_synced_tag`                   | The Tag the sync marks the objects it writes with, and that **Sync Tagged Only** scopes to. See [Tags the sync applies](../../user/integrations/ipfabric.md#tags-the-sync-applies).                                       | `SSoT Synced from IPFabric` |
+| `ipfabric_safe_delete_tag`              | The Tag `Safe Delete Mode` marks objects with instead of deleting them.                                                                                                                       | `SSoT Safe Delete`  |
+| `ipfabric_stack_member_name`            | How each member of a stack other than the master is named. See [Stack members](../../user/integrations/ipfabric.md#stack-members).                                                            | `{hostname}-member{member}`|
+| `ipfabric_stack_master_name`            | How the master of a stack is named.                                                                                                                                                           | `{hostname}`        |
 | `ipfabric_use_canonical_interface_name` | Whether to attempt to elongate interface names as found in IP Fabric.                                                                                                                         | `False`             |
 | `ipfabric_sync_<object type>`           | Pre-selects an object type on the Job form. See [Choosing what to sync](#choosing-what-to-sync).                                                                                              | Varies by type      |
 | `ipfabric_disabled_sync_objects`        | Object types that may not be selected on the Job form at all. See [Choosing what to sync](#choosing-what-to-sync).                                                                            | `[]`                |
@@ -109,6 +114,11 @@ PLUGINS_CONFIG = {
         "ipfabric_safe_delete_vlan_status": os.getenv("NAUTOBOT_SSOT_IPFABRIC_VLAN_DELETE_STATUS"),
         "ipfabric_safe_delete_ipaddress_status": os.getenv("NAUTOBOT_SSOT_IPFABRIC_IPADDRESS_DELETE_STATUS"),
         "ipfabric_safe_delete_cable_status": os.getenv("NAUTOBOT_SSOT_IPFABRIC_CABLE_DELETE_STATUS"),
+        "ipfabric_safe_delete_prefix_status": os.getenv("NAUTOBOT_SSOT_IPFABRIC_PREFIX_DELETE_STATUS"),
+        "ipfabric_synced_tag": os.getenv("NAUTOBOT_SSOT_IPFABRIC_SYNCED_TAG", "SSoT Synced from IPFabric"),
+        "ipfabric_safe_delete_tag": os.getenv("NAUTOBOT_SSOT_IPFABRIC_SAFE_DELETE_TAG", "SSoT Safe Delete"),
+        "ipfabric_stack_member_name": os.getenv("NAUTOBOT_SSOT_IPFABRIC_STACK_MEMBER_NAME", "{hostname}-member{member}"),
+        "ipfabric_stack_master_name": os.getenv("NAUTOBOT_SSOT_IPFABRIC_STACK_MASTER_NAME", "{hostname}"),
         "ipfabric_use_canonical_interface_name": is_truthy(
             os.getenv("NAUTOBOT_SSOT_USE_CANONICAL_INTERFACE_NAME", "true")
         ),
@@ -184,9 +194,12 @@ of that type are left untouched rather than treated as absent from the source an
 | `device_types`  | `Sync Device Types`   | On      |                |
 | `roles`         | `Sync Roles`          | On      |                |
 | `platforms`     | `Sync Platforms`      | On      |                |
+| `software_versions` | `Sync Software Versions` | Off  |                |
+| `software_images` | `Sync Software Images` | Off      | `software_versions` |
 | `interfaces`    | `Sync Interfaces`     | On      |                |
 | `ip_addresses`  | `Sync IP Addresses`   | On      | `interfaces`   |
 | `primary_ip`    | `Sync Primary IP`     | On      | `ip_addresses` |
+| `prefixes`      | `Sync Prefixes`       | Off     |                |
 | `vlans`         | `Sync VLANs`          | On      |                |
 | `cables`        | `Sync Cables`         | Off     | `interfaces`   |
 
@@ -229,20 +242,30 @@ therefore does not stop Locations being *read*; it stops them being *written*. N
 created, updated or deleted, and the `ipfabric_site_id` custom field is left alone, but Devices at
 Locations that already exist in Nautobot still sync normally.
 
-Three consequences follow, all of them intended:
+These consequences follow, all of them intended:
 
-- **A site IP Fabric reports that this sync did not load is not created**, but the Devices at it are
-  still attempted. The Location is looked up by name first, so a Location that another SSoT App has
-  already created is found and the Devices land at it. This matters most with `Sync Tagged Only`
-  enabled: a Location owned by another App carries no IP Fabric tag, so this sync never loads it, and
-  the name lookup is what connects the two.
+- **A site IP Fabric reports that Nautobot does not hold is not created**, but the Devices at it are
+  still attempted. The Location is looked up by name, so a Location that another SSoT App has already
+  created is found and the Devices land at it.
+- **`Sync Tagged Only` does not require a Location to carry the IP Fabric tag.** A Location owned by
+  another App never carries it. The sync reads a Location only if it holds a Device or VLAN this sync
+  tagged, and syncs those Devices in full, including their Interfaces, addresses and Cables. At those
+  Locations it reads only the VLANs it tagged; one it reports and did not tag is adopted rather than
+  duplicated.
 - **A Device whose Location does not exist yet is reported, not skipped silently.** The Job log names
   the Location that could not be found and each Device that could not be placed, so a sync run before
   the App that owns Locations shows up as work to retry rather than as missing data.
 - **A Nautobot Location that IP Fabric does not report is left completely alone**, including the
-  Devices at it. With Locations out of scope the sync holds no opinion about which sites exist, so it
-  cannot treat a missing site as evidence that the Devices at it are gone. With Locations in scope,
-  that same site and its Devices are deleted, subject to Safe Delete Mode.
+  Devices at it and their Interfaces, addresses, Cables, VRF assignments, and the VRFs and VLANs set
+  on their Interfaces. A Cable is kept when either end is at such a site. With Locations out of scope
+  the sync holds no opinion about which sites exist, so it cannot treat a missing site as evidence
+  that its Devices, Cables and assignments were deleted in IP Fabric. With Locations in scope, that
+  same site and its Devices are deleted, subject to Safe Delete Mode.
+
+Whether Locations are in scope or not, the sync identifies a site by name alone, while Nautobot allows
+two Locations with the same name under different parents. When the sync reads two such Locations, it
+loads the Devices and VLANs at both under whichever it read first, and the Job log warns that the name
+is not unique.
 
 The `ipfabric_site_id` custom field is only ever written while Locations are in scope; out of scope it
 belongs to whichever system owns the Location.

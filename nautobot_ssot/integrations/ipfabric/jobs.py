@@ -14,6 +14,8 @@ from ipfabric import IPFClient
 from nautobot.core.forms import DynamicModelChoiceField
 from nautobot.dcim.models import Location
 from nautobot.extras.jobs import BooleanVar, ChoiceVar, ScriptVariable
+from nautobot.ipam.models import Namespace
+from nautobot.tenancy.models import Tenant
 
 from nautobot_ssot.integrations.ipfabric import constants, strict_mode
 from nautobot_ssot.integrations.ipfabric.diffsync.adapter_ipfabric import IPFabricDiffSync
@@ -24,6 +26,7 @@ from nautobot_ssot.integrations.ipfabric.sync_scope import (
     form_fields,
     scope_field_order,
 )
+from nautobot_ssot.integrations.ipfabric.utilities import nbutils
 from nautobot_ssot.integrations.ipfabric.utilities.utils import job_scoped_cache
 from nautobot_ssot.jobs.base import DataMapping, DataSource
 
@@ -118,7 +121,7 @@ class IpFabricDataSource(DataSource):
     sync_ipfabric_tagged_only = BooleanVar(
         default=True,
         label="Sync Tagged Only",
-        description="Only sync objects that have the 'SSoT Synced from IPFabric' Tag.",
+        description=f"Only sync objects that have the '{constants.SYNCED_TAG_NAME}' Tag.",
     )
     bulk_write_mode = BooleanVar(
         default=False,
@@ -132,6 +135,22 @@ class IpFabricDataSource(DataSource):
     location_filter = OptionalObjectVar(
         description="Only sync Nautobot records belonging to a single Location.",
         model=Location,
+        required=False,
+    )
+    tenant = OptionalObjectVar(
+        description=(
+            "The Tenant this IP Fabric instance belongs to. Only that Tenant's Nautobot records are "
+            "read, and the records the sync creates are given it."
+        ),
+        model=Tenant,
+        required=False,
+    )
+    namespace = OptionalObjectVar(
+        description=(
+            "The Namespace the sync's IP Addresses, Prefixes and VRFs belong to. Only that Namespace's "
+            "records are read, and the records the sync creates are put in it. Global when left empty."
+        ),
+        model=Namespace,
         required=False,
     )
     kwargs = {}
@@ -148,6 +167,8 @@ class IpFabricDataSource(DataSource):
             "snapshot",
             "safe_delete_mode",
             "sync_ipfabric_tagged_only",
+            "tenant",
+            "namespace",
             "bulk_write_mode",
             strict_mode.FIELD_NAME,
             *scope_field_order(),
@@ -227,9 +248,12 @@ class IpFabricDataSource(DataSource):
         """List describing the data mappings involved in this DataSource."""
         return (
             DataMapping("Device", None, "Device", reverse("dcim:device_list")),
+            DataMapping("Device OS Version", None, "Software Version", reverse("dcim:softwareversion_list")),
+            DataMapping("Device Image", None, "Software Image File", reverse("dcim:softwareimagefile_list")),
             DataMapping("Location", None, "Location", reverse("dcim:location_list")),
             DataMapping("Interfaces", None, "Interfaces", reverse("dcim:interface_list")),
             DataMapping("IP Addresses", None, "IP Addresses", reverse("ipam:ipaddress_list")),
+            DataMapping("Managed IP Summary", None, "Prefixes", reverse("ipam:prefix_list")),
             DataMapping("VLANs", None, "VLANs", reverse("ipam:vlan_list")),
             DataMapping("Stack Members", None, "Virtual Chassis", reverse("dcim:virtualchassis_list")),
             DataMapping("Connectivity Matrix", None, "Cables", reverse("dcim:cable_list")),
@@ -257,6 +281,7 @@ class IpFabricDataSource(DataSource):
             "Safe Delete IPAddress Status": constants.SAFE_DELETE_IPADDRESS_STATUS,
             "Safe Delete VLAN status": constants.SAFE_DELETE_VLAN_STATUS,
             "Safe Delete Cable Status": constants.SAFE_DELETE_CABLE_STATUS,
+            "Safe Delete Prefix Status": constants.SAFE_DELETE_PREFIX_STATUS,
             "Disabled Sync Objects": ", ".join(disabled_keys()) or "None",
         }
 
@@ -271,6 +296,8 @@ class IpFabricDataSource(DataSource):
             "bulk_write_mode": kwargs.get("bulk_write_mode"),
             "strict": strict_mode.StrictObjects.from_job_kwargs(kwargs),
             "location_filter": kwargs.get("location_filter"),
+            "tenant": kwargs.get("tenant"),
+            "namespace": kwargs.get("namespace"),
             "debug": kwargs.get("debug"),
             "scope": SyncScope.from_job_kwargs(kwargs),
         }
@@ -284,13 +311,41 @@ class IpFabricDataSource(DataSource):
         # refused, and the Interfaces IP Fabric reports are not left colliding with templated ones.
         # Read by `sync_data`, so it has to be set before the base class runs it.
         self.skip_auto_component_creation = bool(kwargs.get("bulk_write_mode"))
-        super().run(*args, **kwargs)
+        try:
+            super().run(*args, **kwargs)
+        finally:
+            # `sync_data` sets it for the run; cleared after, so nothing outside a run can read it.
+            nbutils.use_namespace(None)
 
     def load_source_adapter(self):
         """Not used."""
 
     def load_target_adapter(self):
         """Not used."""
+
+    def warn_if_the_synced_tag_was_renamed(self):
+        """Warn when the configured synced Tag is unused while the default one still marks objects."""
+        left_behind = nbutils.objects_left_on_the_default_synced_tag()
+        if left_behind:
+            self.logger.warning(
+                "No object carries the '%s' Tag yet, while %d carry '%s'. If this replaces a sync that "
+                "used '%s', rename that Tag to '%s' in Nautobot so its objects stay in scope. A second "
+                "IP Fabric instance with a Tag of its own can ignore this.",
+                constants.SYNCED_TAG_NAME,
+                left_behind,
+                constants.DEFAULT_SYNCED_TAG_NAME,
+                constants.DEFAULT_SYNCED_TAG_NAME,
+                constants.SYNCED_TAG_NAME,
+            )
+
+    def log_run_options(self, options: str, scope: SyncScope, strict: strict_mode.StrictObjects):
+        """Log the options the run started with, and what its scope and strictness leave out."""
+        self.logger.info(f"Starting job with the following options: {options}")
+        self.logger.info("Object types in scope: %s", scope.describe())
+        self.logger.info("Object types matched rather than created: %s", strict.describe())
+        for explanation in (*scope.explanations(), *strict.explanations(scope)):
+            self.logger.warning(explanation)
+        self.warn_if_the_synced_tag_was_renamed()
 
     def sync_data(self, *_args, **_kwargs):
         """Sync a device data from IP Fabric into Nautobot."""
@@ -315,17 +370,18 @@ class IpFabricDataSource(DataSource):
         scope = self.kwargs["scope"]
         location_filter = self.kwargs["location_filter"]
         debug_mode = self.kwargs["debug"]
+        tenant = Tenant.objects.get(pk=self.kwargs["tenant"]) if self.kwargs.get("tenant") else None
+        namespace = Namespace.objects.get(pk=self.kwargs["namespace"]) if self.kwargs.get("namespace") else None
+        # Set on every run, None included, so that a Namespace chosen for the last run in this
+        # worker is not inherited by this one.
+        nbutils.use_namespace(namespace)
 
         if location_filter:
             location_filter_object = Location.objects.get(pk=location_filter)
         else:
             location_filter_object = None
-        options = f"`Snapshot_id`: {self.client.snapshot_id}.`Debug`: {debug_mode}, `Dry Run`: {dryrun}, `Safe Delete Mode`: {safe_mode}, `Sync Tagged Only`: {tagged_only}, `Bulk Write Mode`: {bulk_write_mode}, `Location Filter`: {location_filter_object}"
-        self.logger.info(f"Starting job with the following options: {options}")
-        self.logger.info("Object types in scope: %s", scope.describe())
-        self.logger.info("Object types matched rather than created: %s", strict.describe())
-        for explanation in (*scope.explanations(), *strict.explanations(scope)):
-            self.logger.warning(explanation)
+        options = f"`Snapshot_id`: {self.client.snapshot_id}.`Debug`: {debug_mode}, `Dry Run`: {dryrun}, `Safe Delete Mode`: {safe_mode}, `Sync Tagged Only`: {tagged_only}, `Bulk Write Mode`: {bulk_write_mode}, `Location Filter`: {location_filter_object}, `Tenant`: {tenant}, `Namespace`: {nbutils.get_run_namespace()}"
+        self.log_run_options(options, scope, strict)
 
         ipfabric_source = IPFabricDiffSync(
             job=self,
@@ -334,6 +390,7 @@ class IpFabricDataSource(DataSource):
             location_filter=location_filter_object.name if location_filter_object else None,
             scope=scope,
             strict=strict,
+            tenant=tenant,
             safe_delete_mode=safe_mode,
         )
         self.logger.info("Loading current data from IP Fabric...")
@@ -350,10 +407,14 @@ class IpFabricDataSource(DataSource):
             location_filter=location_filter_object,
             scope=scope,
             strict=strict,
+            tenant=tenant,
             addresses_without_a_subnet=ipfabric_source.addresses_without_a_subnet,
             interfaces_without_admin_state=ipfabric_source.interfaces_without_admin_state,
             devices_without_a_hardware_serial=ipfabric_source.devices_without_a_hardware_serial,
             interfaces_without_a_type=ipfabric_source.interfaces_without_a_type,
+            devices_without_a_software_version=ipfabric_source.devices_without_a_software_version,
+            devices_without_a_software_image=ipfabric_source.devices_without_a_software_image,
+            stack_device_names=ipfabric_source.stack_device_names,
         )
 
         self.logger.info("Loading current data from Nautobot...")

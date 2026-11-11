@@ -7,9 +7,7 @@ calls, regression guards for fixed bugs. Nautobot ORM calls and the
 test suites.
 """
 
-import ast
 import contextlib
-import pathlib
 from collections import Counter
 from types import SimpleNamespace
 from typing import List
@@ -23,6 +21,7 @@ from nautobot_ssot.integrations.ipfabric.bulk_writes import PendingWrites
 from nautobot_ssot.integrations.ipfabric.diffsync import diffsync_models
 from nautobot_ssot.integrations.ipfabric.diffsync.adapters_shared import DiffSyncModelAdapters
 from nautobot_ssot.integrations.ipfabric.diffsync.diffsync_models import (
+    WRITE_OPERATIONS,
     Cable,
     Device,
     DiffSyncExtras,
@@ -32,6 +31,7 @@ from nautobot_ssot.integrations.ipfabric.diffsync.diffsync_models import (
 )
 from nautobot_ssot.integrations.ipfabric.strict_mode import StrictObjects
 from nautobot_ssot.integrations.ipfabric.sync_scope import SYNCABLE_OBJECTS, SyncScope
+from nautobot_ssot.integrations.ipfabric.writers import BatchedWriter, ImmediateWriter
 
 # ============================================================
 # Shared helpers
@@ -68,6 +68,9 @@ def _make_adapter(scope=None, strict=None, bulk_write_mode=False):
     # Set explicitly because, left as a mock, it is truthy and every model here would queue its
     # writes instead of making them.
     adapter.pending = PendingWrites(mock.MagicMock()) if bulk_write_mode else None
+    adapter.writer = BatchedWriter(adapter.pending) if bulk_write_mode else ImmediateWriter()
+    # None rather than a mock, which would read as a Tenant every lookup has to be narrowed to.
+    adapter.tenant = None
     adapter.job = mock.MagicMock()
     adapter.job.debug = False
     adapter.ssot_tag = mock.MagicMock(name="ssot_tag")
@@ -619,7 +622,11 @@ class TestDeviceModel(_ModelTestBase):  # pylint: disable=too-many-public-method
             diff_model.update({"location_name": "new-loc"})
 
         mock_loc_helper.assert_called_once_with(
-            location_name="new-loc", location_id=None, logger=self.adapter.job.logger, pending=None
+            location_name="new-loc",
+            location_id=None,
+            logger=self.adapter.job.logger,
+            writer=self.adapter.writer,
+            tenant=None,
         )
         self.assertIs(nb_device.location, new_location)
 
@@ -637,7 +644,11 @@ class TestResolveLocation(_ModelTestBase):
 
         self.assertEqual(resolved, "created")
         mock_helper.assert_called_once_with(
-            location_name="loc", location_id="site-id", logger=self.adapter.job.logger, pending=None
+            location_name="loc",
+            location_id="site-id",
+            logger=self.adapter.job.logger,
+            writer=self.adapter.writer,
+            tenant=None,
         )
 
     def test_only_looks_up_when_locations_are_out_of_scope(self):
@@ -954,6 +965,7 @@ class TestInterfaceAddressModel(_ModelTestBase):
         address_object.pk = "this-address"
         interface.ip_addresses.get.return_value = address_object
         self.adapter.pending = pending
+        self.adapter.writer = BatchedWriter(pending) if pending is not None else ImmediateWriter()
 
         with (
             _nb_patch("get_tagged_interface", return_value=interface),
@@ -1197,7 +1209,7 @@ class TestVlanModel(_ModelTestBase):
 # ============================================================
 
 
-class TestCableModel(_ModelTestBase):
+class TestCableModel(_ModelTestBase):  # pylint: disable=too-many-public-methods
     """Test `Cable.create/update/delete` branching logic."""
 
     IDS = {
@@ -1273,6 +1285,44 @@ class TestCableModel(_ModelTestBase):
         mock_create_cable.assert_not_called()
         mock_super.assert_not_called()
         self._assert_log_contains(self.adapter.job.logger.warning, "Safe Delete Mode")
+
+    def test_create_under_tagged_only_leaves_a_cable_this_sync_did_not_tag(self):
+        """Sync Tagged Only protects a Cable another process made, so the link is reported instead."""
+        occupied = mock.MagicMock()
+        occupied.cable.tags.filter.return_value.exists.return_value = False
+        self.adapter.sync_ipfabric_tagged_only = True
+
+        with (
+            mock.patch.object(self.adapter, "safe_delete_mode", False),
+            _nb_patch("get_tagged_interface", side_effect=[occupied, self._uncabled_interface()]),
+            _cable_patch("cable_connects", return_value=False),
+            _cable_patch("create_cable") as mock_create_cable,
+            mock.patch.object(diffsync_models.DiffSyncModel, "create") as mock_super,
+        ):
+            result = Cable.create(adapter=self.adapter, ids=self.IDS, attrs=self.ATTRS)
+
+        self.assertIsNone(result)
+        occupied.cable.delete.assert_not_called()
+        mock_create_cable.assert_not_called()
+        mock_super.assert_not_called()
+        self._assert_log_contains(self.adapter.job.logger.warning, "Sync Tagged Only will not remove it")
+
+    def test_create_under_tagged_only_displaces_a_cable_this_sync_tagged(self):
+        occupied = mock.MagicMock()
+        occupied.cable.tags.filter.return_value.exists.return_value = True
+        self.adapter.sync_ipfabric_tagged_only = True
+
+        with (
+            mock.patch.object(self.adapter, "safe_delete_mode", False),
+            _nb_patch("get_tagged_interface", side_effect=[occupied, self._uncabled_interface()]),
+            _cable_patch("cable_connects", return_value=False),
+            _cable_patch("create_cable", return_value=mock.MagicMock()),
+            mock.patch.object(diffsync_models.DiffSyncModel, "create", return_value="ok"),
+        ):
+            result = Cable.create(adapter=self.adapter, ids=self.IDS, attrs=self.ATTRS)
+
+        self.assertEqual(result, "ok")
+        occupied.cable.delete.assert_called_once()
 
     def test_create_displaces_a_stale_cable_when_safe_delete_is_off(self):
         """With safe delete off, the Cable holding the Interface is removed so the link can move."""
@@ -1511,54 +1561,86 @@ class TestCableModel(_ModelTestBase):
 
 
 class TestDeferredChangeLoggingCoverage(SimpleTestCase):
-    """Every model operation that writes must defer its change log.
+    """Every model operation that writes defers its change log, which `DiffSyncExtras` applies."""
 
-    The scope is applied as a decorator on each operation, since DiffSync calls `create`, `update`
-    and `delete` itself and each subclass does its writes before delegating to `super()`. Hand
-    application means a new model, or a rename, can silently lose it, so this asserts the invariant
-    instead of relying on it being remembered.
-    """
+    def test_every_write_operation_of_every_model_defers_its_change_log(self):
+        models = DiffSyncExtras.__subclasses__()
+        self.assertTrue(models, "No DiffSyncExtras subclasses found, so this test proves nothing.")
+        for model in models:
+            for name in WRITE_OPERATIONS:
+                if name in model.__dict__:
+                    with self.subTest(model=model.__name__, operation=name):
+                        self.assertTrue(getattr(getattr(model, name), "defers_change_logging", False))
 
-    WRITING_OPERATIONS = ("create", "update", "delete")
+    def test_a_new_model_is_covered_and_keeps_its_fields(self):
+        class Widget(DiffSyncExtras):
+            """A model defined after the integration's own, as a new one would be."""
 
-    @staticmethod
-    def _decorated_operations(class_node):
-        """Return the operations on an `ast` class node that carry the deferral decorator."""
-        decorated = set()
-        for node in class_node.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                # Matches `@tonb_nbutils.deferred_change_logging()`.
-                function = decorator.func if isinstance(decorator, ast.Call) else decorator
-                if isinstance(function, ast.Attribute) and function.attr == "deferred_change_logging":
-                    decorated.add(node.name)
-        return decorated
+            _modelname = "widget"
+            _identifiers = ("name",)
+            _attributes = ("colour",)
 
-    def test_every_write_operation_defers_its_change_log(self):
-        module = ast.parse(pathlib.Path(diffsync_models.__file__).read_text(encoding="utf-8"))
-        subclasses = {model.__name__ for model in DiffSyncExtras.__subclasses__()}
-        self.assertTrue(subclasses, "No DiffSyncExtras subclasses found, so this test proves nothing.")
+            name: str
+            colour: str = "red"
 
-        checked = 0
-        for class_node in (node for node in module.body if isinstance(node, ast.ClassDef)):
-            if class_node.name not in subclasses:
-                continue
-            defined = {
-                node.name
-                for node in class_node.body
-                if isinstance(node, ast.FunctionDef) and node.name in self.WRITING_OPERATIONS
-            }
-            decorated = self._decorated_operations(class_node)
-            for operation in sorted(defined):
-                checked += 1
-                self.assertIn(
-                    operation,
-                    decorated,
-                    f"{class_node.name}.{operation} writes without deferring its change log, which "
-                    "costs a change log rewrite per write and pins the instance for the whole job.",
-                )
-        self.assertEqual(checked, 31, "Expected 31 write operations across the eleven models.")
+            @classmethod
+            def create(cls, adapter, ids, attrs):
+                return "created"
+
+            def update(self, attrs):
+                return "updated"
+
+        self.assertTrue(getattr(Widget.create, "defers_change_logging", False))
+        self.assertTrue(getattr(Widget.update, "defers_change_logging", False))
+        self.assertTrue({"name", "colour"} <= set(Widget.model_fields))
+        self.assertEqual(Widget(name="a").colour, "red")
+
+        entered = []
+
+        @contextlib.contextmanager
+        def recording_deferral():
+            entered.append(True)
+            yield
+
+        with mock.patch.object(diffsync_models.tonb_nbutils, "deferred_change_logging", recording_deferral):
+            self.assertEqual(Widget.create(None, {"name": "a"}, {}), "created")
+            self.assertEqual(Widget(name="a").update({}), "updated")
+        self.assertEqual(entered, [True, True])
+
+    def test_a_model_that_is_not_batched_writes_the_queue_before_each_operation(self):
+        class Gadget(DiffSyncExtras):
+            """A model written object by object."""
+
+            _modelname = "gadget"
+            _identifiers = ("name",)
+            batched = False
+
+            name: str
+
+            @classmethod
+            def create(cls, adapter, ids, attrs):
+                return adapter.flush_pending_writes.call_count
+
+            def delete(self):
+                return self.adapter.flush_pending_writes.call_count
+
+        adapter = DiffSyncModelAdapters()
+        adapter.pending = mock.MagicMock()
+        adapter.flush_pending_writes = mock.MagicMock()
+        self.assertEqual(Gadget.create(adapter=adapter, ids={"name": "a"}, attrs={}), 1)
+        self.assertEqual(Gadget(name="a", adapter=adapter).delete(), 2)
+        adapter.pending = None
+        self.assertEqual(Gadget.create(adapter, {"name": "b"}, {}), 2)
+
+    def test_cables_prefix_vlans_and_host_addresses_are_written_object_by_object(self):
+        self.assertEqual(
+            sorted(
+                model.__name__
+                for model in DiffSyncExtras.__subclasses__()
+                if not model.batched and model.__module__ == diffsync_models.__name__
+            ),
+            ["Cable", "HostAddress", "PrefixVlan"],
+        )
 
 
 class _Site(DiffSyncModel):

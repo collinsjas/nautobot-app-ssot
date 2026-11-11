@@ -4,17 +4,20 @@
 # The adapter carries the job's options  #  pylint: disable=too-many-instance-attributes
 """DiffSync adapter class for Nautobot as source-of-truth."""
 
+import ipaddress
 from collections import defaultdict
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from diffsync import Adapter
 from diffsync.exceptions import ObjectAlreadyExists, ObjectNotFound
+from django.core.exceptions import ValidationError
+from django.db import Error as DjangoBaseDBError
 from django.db import IntegrityError, transaction
-from django.db.models import ProtectedError
+from django.db.models import ProtectedError, Q
 from nautobot.core.choices import ColorChoices
-from nautobot.dcim.models import Device, Location
+from nautobot.dcim.models import Cable, Device, Location
 from nautobot.extras.models import Tag
-from nautobot.ipam.models import VLAN, VRF, Interface, RouteTarget, VRFDeviceAssignment
+from nautobot.ipam.models import VLAN, VRF, Interface, IPAddress, Prefix, RouteTarget, VRFDeviceAssignment
 from netutils.mac import mac_to_format
 
 import nautobot_ssot.integrations.ipfabric.utilities.cables as tonb_cables
@@ -28,9 +31,14 @@ from nautobot_ssot.integrations.ipfabric.constants import (
     INTERFACE_L2_CF_NAME,
     INTERFACE_REASON_CF_NAME,
     PSEUDO_MANAGEMENT_INTERFACE_NAME,
+    SAFE_DELETE_IPADDRESS_STATUS,
+    SAFE_DELETE_PREFIX_STATUS,
+    SAFE_DELETE_TAG_NAME,
     SYNC_IPF_DEV_TYPE_TO_ROLE,
+    SYNCED_TAG_NAME,
 )
 from nautobot_ssot.integrations.ipfabric.diffsync import DiffSyncModelAdapters
+from nautobot_ssot.integrations.ipfabric.diffsync.unreported_sites import shield_unreported_sites
 from nautobot_ssot.integrations.ipfabric.utilities.utils import job_scoped_cache
 
 # How many objects to delete per statement. Django walks the relations of a whole batch once, so
@@ -49,6 +57,8 @@ DELETE_BATCH_SIZE = 1000
 DELETE_ORDER = (
     "_cable",
     "_ipaddress",
+    # After the addresses, since Nautobot will not delete a Prefix that still holds any.
+    "_prefix",
     "_vlan",
     "_interface",
     "_vrfdeviceassignment",
@@ -61,6 +71,12 @@ DELETE_ORDER = (
 # How many rows bulk mode will hold before writing them. Without a ceiling a sync of a hundred
 # thousand Interfaces would keep every one of them, and their addresses, in memory until the end.
 PENDING_WRITE_HIGH_WATER = 5000
+
+
+def network_order(prefix: str):
+    """Sort key putting networks in address order, IPv4 before IPv6, since the two do not compare."""
+    network = ipaddress.ip_network(prefix)
+    return network.version, network
 
 
 def delete_objects(queued_deletions: List, logger):
@@ -99,7 +115,7 @@ def delete_objects_one_at_a_time(queued_deletions: List, logger):
             logger.warning(f"Deletion failed due to IntegrityError with {model.__name__} {pk}")
 
 
-class NautobotDiffSync(DiffSyncModelAdapters):
+class NautobotDiffSync(DiffSyncModelAdapters):  # pylint: disable=too-many-public-methods
     """Nautobot adapter for DiffSync."""
 
     _vlan: ClassVar[Any] = VLAN
@@ -115,10 +131,16 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         location_filter: Optional[Location],
         *args,
         bulk_write_mode: bool = False,
+        stack_device_names: Optional[Dict[str, Dict[int, str]]] = None,
         **kwargs,
     ):
-        """Initialize the NautobotDiffSync."""
+        """Initialize the NautobotDiffSync.
+
+        `stack_device_names` holds each stack's Device names by member number, keyed by its Virtual
+        Chassis name, as the IP Fabric adapter names them. See `rename_stack_devices`.
+        """
         super().__init__(*args, **kwargs)
+        self.stack_device_names = stack_device_names or {}
         self.job = job
         self.sync = sync
         self.sync_ipfabric_tagged_only = sync_ipfabric_tagged_only
@@ -133,7 +155,7 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         # Placeholder Interfaces found while strict about Interfaces, reported once loading is done.
         self.placeholder_interfaces = []
         self.ssot_tag = tonb_utils.get_or_create_tag_object(
-            tag_name="SSoT Synced from IPFabric",
+            tag_name=SYNCED_TAG_NAME,
             tag_color=ColorChoices.COLOR_LIGHT_GREEN,
             description="Object synced at some point from IPFabric to Nautobot",
             app_label="dcim",
@@ -141,7 +163,7 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             logger=self.job.logger,
         )
         self.safe_delete_tag = tonb_utils.get_or_create_tag_object(
-            tag_name="SSoT Safe Delete",
+            tag_name=SAFE_DELETE_TAG_NAME,
             tag_color=ColorChoices.COLOR_RED,
             description="Safe Delete Mode tag to flag an object, but not delete from Nautobot.",
             app_label="dcim",
@@ -180,7 +202,55 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             # later run objects whose rows were rolled back.
             job_scoped_cache.clear_all()
         self.report_safe_delete_tally()
+        self.report_prefix_findings()
+        self.report_objects_of_another_tenant()
         return super().sync_complete(source, *args, **kwargs)
+
+    def report_prefix_findings(self):
+        """Report what strictness held back, and the Locations and VLANs no Prefix could be recorded at."""
+        if self.prefixes_not_created:
+            self.job.logger.warning(
+                "Not creating %d Prefixes IP Fabric reports, as Nautobot holds none of them and this run "
+                "is strict about Prefixes: %s",
+                len(self.prefixes_not_created),
+                ", ".join(sorted(self.prefixes_not_created, key=network_order)),
+            )
+            self.prefixes_not_created.clear()
+        if self.addresses_outside_every_prefix:
+            self.job.logger.warning(
+                "Not syncing %d addresses, as no Prefix Nautobot holds covers them and this run is "
+                "strict about Prefixes: %s",
+                len(self.addresses_outside_every_prefix),
+                ", ".join(sorted(self.addresses_outside_every_prefix)),
+            )
+            self.addresses_outside_every_prefix.clear()
+        for location_name, count in sorted(self.prefix_locations_not_found.items()):
+            self.job.logger.warning(
+                "Not recording %d Prefixes at the Location named %s, as Nautobot holds no Location of that name.",
+                count,
+                location_name,
+            )
+        self.prefix_locations_not_found.clear()
+        for (location_name, vid), count in sorted(self.prefix_vlans_not_found.items()):
+            self.job.logger.warning(
+                "Not recording VLAN %d at %s on %d Prefixes, as Nautobot holds no such VLAN.",
+                vid,
+                location_name,
+                count,
+            )
+        self.prefix_vlans_not_found.clear()
+
+    def report_objects_of_another_tenant(self):
+        """Report the objects not touched because they belong to another Tenant, once per model."""
+        for model_name, names in sorted(self.objects_of_another_tenant.items()):
+            self.job.logger.warning(
+                "Not syncing %d %s IP Fabric reports, as they belong to a Tenant other than %s: %s",
+                len(names),
+                model_name,
+                self.tenant,
+                ", ".join(sorted(names)),
+            )
+        self.objects_of_another_tenant.clear()
 
     def report_safe_delete_tally(self):
         """Report what Safe Delete Mode did, one line per object type and outcome."""
@@ -188,32 +258,15 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             self.job.logger.warning("%d %s objects %s.", count, model_name, outcome)
         self.safe_delete_tally.clear()
 
-    def flush_pending_writes_if_full(self) -> int:
+    def flush_pending_writes_if_full(self) -> None:
         """Write the queue if it has grown past what is worth holding in memory.
 
         Called once a model has finished its own work, which is the only safe point: a queue flushed
         part way through an operation would miss whatever that operation went on to set, such as a
         Device's virtual chassis fields.
         """
-        if len(self.pending) < PENDING_WRITE_HIGH_WATER:
-            return 0
-        return self.flush_pending_writes()
-
-    def flush_pending_writes(self) -> int:
-        """Write whatever bulk mode has queued, and report what was written.
-
-        Called before anything that reads those objects back from the database, and at the end of
-        the sync. A no-op when nothing is queued, so callers need not check the mode first.
-        """
-        if not self.pending:
-            return 0
-        counts = self.pending.counts()
-        written = self.pending.flush()
-        # Rows exist now that did not when these lookups last ran, and one of them caching that a
-        # Device could not be found is enough to lose every Cable terminating on it.
-        job_scoped_cache.clear_group(tonb_utils.BULK_WRITTEN_LOOKUPS)
-        self.job.logger.info("Wrote %d queued rows in bulk mode: %s", written, counts)
-        return written
+        if len(self.pending) >= PENDING_WRITE_HIGH_WATER:
+            self.flush_pending_writes()
 
     def load_interfaces(self, device_record: Device, diffsync_device):
         """Import a single Nautobot Interface object as a DiffSync Interface model."""
@@ -283,8 +336,12 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         # the source says it is, which is a difference no sync could ever apply away. Both are
         # `select_related` while addresses are in scope, so neither costs a query here.
         device_primary_ips = {addr for addr in (device_record.primary_ip4, device_record.primary_ip6) if addr}
+        namespace = tonb_utils.get_run_namespace() if tonb_utils.namespace_chosen() else None
         for address_record in interface_record.ip_addresses.all():
             if (device_record.name, interface_record.name, address_record.host) in self.addresses_without_a_subnet:
+                continue
+            if namespace is not None and address_record.parent.namespace_id != namespace.pk:
+                # Another Namespace's address, which a run for this one neither reads nor removes.
                 continue
             address = self.interface_address(
                 device_name=device_record.name,
@@ -305,12 +362,17 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         deleted on every run.
         """
         endpoints_by_cable = defaultdict(list)
+        # Under Sync Tagged Only, a Cable another process made between two synced Devices is not
+        # this sync's to reconcile, so only the ones carrying its Tag are loaded.
+        tagged_cables = tonb_utils.get_tagged_pks(Cable, self.ssot_tag.id) if self.sync_ipfabric_tagged_only else None
         for interface_record in tonb_cables.cabled_interfaces(device_queryset):
             endpoint = (interface_record.device.name, interface_record.name)
             try:
                 self.get(self.interface, {"name": endpoint[1], "device_name": endpoint[0]})
             except ObjectNotFound:
                 # The Interface's Device was skipped while loading, so the link is out of scope.
+                continue
+            if tagged_cables is not None and interface_record.cable.pk not in tagged_cables:
                 continue
             endpoints_by_cable[interface_record.cable].append(endpoint)
 
@@ -339,16 +401,38 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate Cable discovered, {cable.get_unique_id()}")
 
-    def get_in_scope_devices(self, location_objects):
-        """Return the Devices at the given Locations that this sync covers.
+    def get_in_scope_devices(self):
+        """Return the Devices this sync covers, through the scope every write finds its Device in.
 
         Shared by Device loading and Cable loading, so that Cables cannot load for Devices whose
         Interfaces did not.
         """
-        devices = Device.objects.filter(location__in=location_objects)
-        if self.sync_ipfabric_tagged_only:
-            devices = devices.filter(tags=self.ssot_tag)
-        return devices
+        return self.device_scope.devices()
+
+    def software_of(self, device_record: Device) -> Tuple[Optional[str], Optional[str]]:
+        """Return the software version and images to report for a Device.
+
+        None for either where it is out of scope, or where IP Fabric reported nothing to compare with:
+        see `devices_without_a_software_version` and `devices_without_a_software_image`.
+        """
+        version = image = None
+        if (
+            self.scope.software_versions
+            and device_record.software_version
+            and device_record.name not in self.devices_without_a_software_version
+        ):
+            version = device_record.software_version.version
+        if self.scope.software_images and device_record.name not in self.devices_without_a_software_image:
+            # Lowercased as the IP Fabric side reports it, since an existing image is matched ignoring case.
+            image = (
+                ", ".join(
+                    sorted(
+                        image_file.image_file_name.lower() for image_file in device_record.software_image_files.all()
+                    )
+                )
+                or None
+            )
+        return version, image
 
     def load_devices(self, filtered_devices: List, locations_by_name: Dict[str, Any]):
         """Load Devices from Nautobot, placing each under the Location it belongs to.
@@ -366,6 +450,8 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             "virtual_chassis",
             "virtual_chassis__master",
         ]
+        if self.scope.software_versions:
+            related.append("software_version")
         # Only fetch the relations something in scope reads: the primary IP decides whether an
         # Interface holds it, and the Interfaces themselves are only walked when they are in scope.
         prefetch = []
@@ -374,8 +460,13 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             # `__status` because each address reports its own; without it the walk below costs a
             # query per address, which is a hundred thousand of them on a real estate.
             prefetch.append("interfaces__ip_addresses__status")
+            if tonb_utils.namespace_chosen():
+                # Each address's Namespace is read through its parent to keep only the chosen one's.
+                prefetch.append("interfaces__ip_addresses__parent")
         elif self.scope.interfaces:
             prefetch.append("interfaces")
+        if self.scope.software_images:
+            prefetch.append("software_image_files")
         if self.scope.interfaces:
             # Each Interface reports the port it hangs off by name, which is one query per
             # Interface without this.
@@ -413,6 +504,7 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             )
             if device_record.platform:
                 device.platform = device_record.platform.name
+            device.software_version, device.software_image = self.software_of(device_record)
             if device_record.virtual_chassis:
                 device.vc_name = device_record.virtual_chassis.name
                 device.vc_position = device_record.vc_position
@@ -434,12 +526,14 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         One query covers every Location. A VLAN assigned to several of them is loaded once per
         Location, as each is a separate DiffSync VLAN, matching how IP Fabric reports VLANs per site.
         """
-        filtered_vlans = (
-            VLAN.objects.filter(locations__in=location_objects)
-            .select_related("status")
-            .prefetch_related("locations")
-            .distinct()
-        )
+        vlans = VLAN.objects.filter(locations__in=location_objects)
+        if self.sync_ipfabric_tagged_only and not self.tagged_locations_only:
+            # The Locations are another App's and untagged, so a VLAN there is read only if this sync
+            # tagged it. One it reports and did not tag is found and adopted when it is created.
+            vlans = vlans.filter(tags=self.ssot_tag)
+        if self.tenant is not None:
+            vlans = vlans.filter(tenant=self.tenant)
+        filtered_vlans = vlans.select_related("status").prefetch_related("locations").distinct()
         for vlan_record in filtered_vlans:
             for location_record in vlan_record.locations.all():
                 location = locations_by_name.get(location_record.name)
@@ -506,7 +600,7 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         interfaces = Interface.objects.filter(
             device__in=filtered_devices,
             vrf__isnull=False,
-            vrf__namespace=tonb_utils.get_global_namespace(),
+            vrf__namespace=tonb_utils.get_run_namespace(),
         ).values_list("device__name", "name", "vrf__name")
         for device_name, interface_name, vrf_name in interfaces:
             try:
@@ -532,7 +626,7 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         and Devices are already narrowed by the filter, so both sides narrow together.
         """
         assignments = VRFDeviceAssignment.objects.filter(
-            vrf__namespace=tonb_utils.get_global_namespace(),
+            vrf__namespace=tonb_utils.get_run_namespace(),
             device__in=filtered_devices,
         ).values_list("vrf__name", "device__name")
         for vrf_name, device_name in assignments:
@@ -556,11 +650,14 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         since the name is unique: it is reported as a create, and creating it marks the one Nautobot
         already holds. That is what lets a first run converge against an existing estate.
         """
-        for route_target in RouteTarget.objects.filter(tags=self.ssot_tag).values_list("name", flat=True):
+        route_targets = RouteTarget.objects.filter(tags=self.ssot_tag)
+        if self.tenant is not None:
+            route_targets = route_targets.filter(tenant=self.tenant)
+        for route_target in route_targets.values_list("name", flat=True):
             self.add(self.network_wide(self.route_target, name=route_target))
 
     def load_vrfs(self):
-        """Add Nautobot VRFs in the Global Namespace as DiffSync Vrf models.
+        """Add Nautobot VRFs in the run's Namespace as DiffSync Vrf models.
 
         A name the Namespace holds twice is loaded as neither of them. Nautobot constrains a VRF to
         a unique route distinguisher within its Namespace but not to a unique name, while IP Fabric
@@ -568,7 +665,9 @@ class NautobotDiffSync(DiffSyncModelAdapters):
         describes. Loading one would have the sync write IP Fabric's values over whichever came
         first; loading neither leaves both alone and reports why.
         """
-        vrfs = VRF.objects.filter(namespace=tonb_utils.get_global_namespace()).select_related("status")
+        vrfs = VRF.objects.filter(namespace=tonb_utils.get_run_namespace()).select_related("status")
+        if self.tenant is not None:
+            vrfs = vrfs.filter(tenant=self.tenant)
         if self.scope.route_targets:
             vrfs = vrfs.prefetch_related("import_targets", "export_targets")
         by_name = defaultdict(list)
@@ -579,9 +678,10 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             if len(vrf_records) > 1:
                 self.ambiguous_vrf_names.add(name)
                 self.job.logger.warning(
-                    "Not syncing the VRF named %s, as the Global Namespace holds %d VRFs of that name "
+                    "Not syncing the VRF named %s, as Namespace %s holds %d VRFs of that name "
                     "and IP Fabric reports nothing that tells them apart",
                     name,
+                    tonb_utils.get_run_namespace(),
                     len(vrf_records),
                 )
                 continue
@@ -604,6 +704,107 @@ class NautobotDiffSync(DiffSyncModelAdapters):
                 )
             )
 
+    def load_prefixes(self):
+        """Add the Prefixes this integration created or adopted as DiffSync Prefix models.
+
+        Scoped to the ones carrying the sync's Tag, as Route Targets are, rather than every Prefix
+        in the run's Namespace. Prefixes are the shape another IPAM system governs, and loading
+        all of them would have this sync delete every Prefix IP Fabric does not report the moment
+        Prefixes were selected. One IP Fabric reports that is absent here is adopted rather than
+        duplicated when it is created.
+
+        A Prefix's status is reported as Active unless it is the one Safe Delete Mode marks it with,
+        since IP Fabric reports no status of its own: a Prefix held as Reserved is left so, while
+        one this sync marked is restored when IP Fabric reports it again.
+
+        Each Location a loaded Prefix is recorded at is loaded as well, network wide like the Prefix,
+        so that a Location filtered run does not take a Prefix out of the Locations it cannot see. So is
+        its VLAN, or the VLANs IP Fabric disagreed between; see `load_prefix_vlan`.
+        """
+        prefixes = (
+            Prefix.objects.filter(namespace=tonb_utils.get_run_namespace(), tags=self.ssot_tag)
+            .select_related("status", "vlan")
+            .prefetch_related("locations", "vlan__locations")
+        )
+        if self.tenant is not None:
+            prefixes = prefixes.filter(tenant=self.tenant)
+        for prefix_record in prefixes:
+            prefix = ipaddress.ip_network(str(prefix_record.prefix)).with_prefixlen
+            status = prefix_record.status.name if prefix_record.status else "Active"
+            self.add(
+                self.network_wide(
+                    self.prefix,
+                    prefix=prefix,
+                    status=status if status == SAFE_DELETE_PREFIX_STATUS else "Active",
+                )
+            )
+            for location in prefix_record.locations.all():
+                self.add(self.network_wide(self.prefix_location, prefix=prefix, location_name=location.name))
+            self.load_prefix_vlan(prefix, prefix_record)
+
+    def load_host_addresses(self):
+        """Add the IP Addresses of the hosts this integration synced as DiffSync HostAddress models.
+
+        Those are the addresses carrying the sync's Tag that no Interface holds. Each is network wide,
+        like the Prefix it sits under, so a Location filtered run does not remove the hosts of the
+        sites it cannot see. An address carrying the Tag that an Interface used to hold is read here
+        too, and removed like a host IP Fabric no longer reports.
+
+        Status is reported as Active unless it is Safe Delete Mode's, as for a Prefix, so that a host
+        this sync marked is restored when IP Fabric discovers it again.
+        """
+        addresses = IPAddress.objects.filter(
+            tags=self.ssot_tag, interfaces__isnull=True, vm_interfaces__isnull=True, **tonb_utils.run_namespace_filter()
+        ).select_related("status")
+        if self.tenant is not None:
+            addresses = addresses.filter(tenant=self.tenant)
+        for address_record in addresses:
+            status = address_record.status.name if address_record.status else "Active"
+            host_address = self.network_wide(
+                self.host_address,
+                host=str(address_record.host),
+                mask_length=address_record.mask_length,
+                dns_name=address_record.dns_name or "",
+                mac_address=address_record.custom_field_data.get(tonb_utils.HOST_MAC_CF_NAME) or "",
+                status=status if status == SAFE_DELETE_IPADDRESS_STATUS else "Active",
+            )
+            try:
+                self.add(host_address)
+            except ObjectAlreadyExists:
+                # The same host in two Namespaces, read together when no Namespace is chosen.
+                self.job.logger.warning(
+                    "Not syncing the host %s, as more than one Namespace holds an IP Address of it",
+                    address_record.host,
+                )
+
+    def load_prefix_vlan(self, prefix: str, prefix_record: Prefix):
+        """Add a Prefix's VLAN, or the conflict recorded in its place, as a DiffSync PrefixVlan model.
+
+        A VLAN is named by its ID and its first Location by name, as the IP Fabric adapter names the
+        VLAN at the site it reports; see `first_locations_of_vlans`.
+        """
+        conflict = prefix_record.custom_field_data.get(tonb_utils.PREFIX_VLAN_CONFLICT_CF_NAME) or ""
+        vlan_record = prefix_record.vlan
+        if vlan_record is None and not conflict:
+            return
+        vid = location_name = None
+        if vlan_record is not None:
+            vid = vlan_record.vid
+            location_name = min((location.name for location in vlan_record.locations.all()), default=None)
+        self.add(
+            self.network_wide(self.prefix_vlan, prefix=prefix, vid=vid, location_name=location_name, conflict=conflict)
+        )
+
+    def diff_from(self, source, *args, **kwargs):
+        """Flag the Cables and assignments at sites `source` does not report, then diff against `source`.
+
+        `sync_from` calls this method too, so a sync leaves those Cables and assignments in place just as
+        its preview does.
+        """
+        if not self.scope.locations:
+            shield_unreported_sites(self, {location.name for location in source.get_all("location")})
+        return super().diff_from(source, *args, **kwargs)
+
     def get_initial_location(self, ssot_tag: Tag):
         """Identify the location objects based on user defined job inputs.
 
@@ -611,7 +812,7 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             ssot_tag (Tag): Tag used for filtering
         """
         # Simple check / validate Tag is present.
-        if self.sync_ipfabric_tagged_only:
+        if self.tagged_locations_only:
             location_objects = Location.objects.filter(tags__name=ssot_tag.name)
             if self.location_filter:
                 location_objects = location_objects.filter(name=self.location_filter.name)
@@ -619,11 +820,25 @@ class NautobotDiffSync(DiffSyncModelAdapters):
                     self.job.logger.warning(
                         f"{self.location_filter.name} was used to filter, alongside SSoT Tag. {self.location_filter.name} is not tagged."
                     )
-        elif not self.sync_ipfabric_tagged_only:
+        elif self.sync_ipfabric_tagged_only:
+            # Another App owns these Locations, so they are never tagged. Read only the Locations that hold
+            # a Device or VLAN this sync tagged, not every Location in Nautobot. If IP Fabric reports a
+            # site that holds neither, the sync does not read it. It looks the site up by name when it
+            # places a Device there.
+            holding = Q(devices__in=self.device_scope.devices())
+            if self.scope.vlans:
+                # Count a VLAN only if `load_vlans` would read it at these Locations.
+                vlans = Q(vlans__tags=ssot_tag)
+                if self.tenant is not None:
+                    vlans &= Q(vlans__tenant=self.tenant)
+                holding |= vlans
+            location_objects = Location.objects.filter(holding).distinct()
             if self.location_filter:
-                location_objects = Location.objects.filter(name=self.location_filter.name)
-            else:
-                location_objects = Location.objects.all()
+                location_objects = location_objects.filter(name=self.location_filter.name)
+        elif self.location_filter:
+            location_objects = Location.objects.filter(name=self.location_filter.name)
+        else:
+            location_objects = Location.objects.all()
         return location_objects.select_related("status")
 
     @transaction.atomic
@@ -635,6 +850,10 @@ class NautobotDiffSync(DiffSyncModelAdapters):
             self.load_route_targets()
         if self.scope.vrfs:
             self.load_vrfs()
+        if self.scope.prefixes:
+            self.load_prefixes()
+        if self.scope.host_addresses:
+            self.load_host_addresses()
 
         location_objects = self.get_initial_location(self.ssot_tag)
         # The parent object that stores all children, is the Location.
@@ -658,26 +877,37 @@ class NautobotDiffSync(DiffSyncModelAdapters):
                     "Error loading %s, invalid or missing attributes on object. Skipping...", location_record
                 )
                 continue
-            self.add(location)
+            try:
+                self.add(location)
+            except ObjectAlreadyExists:
+                # Nautobot requires a Location name to be unique only within its parent, but the sync
+                # identifies a site by name alone. Keep the first Location read, and load the Devices and
+                # VLANs of every Location with that name under it.
+                self.job.logger.warning(
+                    "More than one Location is named %s; "
+                    "loading the Devices and VLANs from all of them under the first",
+                    location_record.name,
+                )
+                continue
             locations_by_name[location_record.name] = location
 
         # Children are loaded once for every Location rather than once per Location, so that the
         # number of queries a load takes does not grow with the number of Locations in scope.
-        self.load_devices(self.get_in_scope_devices(location_objects), locations_by_name)
+        self.load_devices(self.get_in_scope_devices(), locations_by_name)
         if self.scope.vlans:
             self.load_vlans(location_objects, locations_by_name)
 
         # Loaded after every Location, as a link may terminate on Devices in two of them.
         if self.scope.cables:
-            self.load_cables(self.get_in_scope_devices(location_objects))
+            self.load_cables(self.get_in_scope_devices())
 
         # Loaded last, as it needs the Devices above and the VRFs loaded before them.
         if self.scope.device_vrfs:
-            self.load_vrf_device_assignments(self.get_in_scope_devices(location_objects))
+            self.load_vrf_device_assignments(self.get_in_scope_devices())
         if self.scope.interface_vrfs:
-            self.load_interface_vrfs(self.get_in_scope_devices(location_objects))
+            self.load_interface_vrfs(self.get_in_scope_devices())
         if self.scope.interface_vlans:
-            self.load_interface_vlans(self.get_in_scope_devices(location_objects))
+            self.load_interface_vlans(self.get_in_scope_devices())
 
         if self.placeholder_interfaces:
             self.job.logger.warning(
@@ -687,6 +917,48 @@ class NautobotDiffSync(DiffSyncModelAdapters):
                 ", ".join(sorted(self.placeholder_interfaces)),
             )
 
+    def rename_stack_devices(self):
+        """Rename the stack Devices this sync wrote to the names the configured formats give them.
+
+        A Device is identified by its name, so changing `ipfabric_stack_member_name` or
+        `ipfabric_stack_master_name` would otherwise read as every stack Device removed and another
+        created, taking the master's Interfaces, addresses and Cables with it. Renamed first, each is
+        found under its new name and keeps all of that. A Device is matched by its Virtual Chassis and
+        its position in it, and only one carrying the sync's Tag is renamed. A dry run reports the
+        renames rather than making them, so its diff shows the old names removed and the new created.
+        """
+        renames = []
+        for vc_name, names in self.stack_device_names.items():
+            devices = Device.objects.filter(virtual_chassis__name=vc_name, vc_position__in=names, tags=self.ssot_tag)
+            if self.tenant is not None:
+                devices = devices.filter(tenant=self.tenant)
+            renames.extend(
+                (device, names[device.vc_position]) for device in devices if device.name != names[device.vc_position]
+            )
+        if not renames:
+            return
+        if self.job.dryrun:
+            self.job.logger.info(
+                "A sync would rename %d stack Devices to the configured format: %s",
+                len(renames),
+                ", ".join(f"{device.name} to {name}" for device, name in renames),
+            )
+            return
+        renamed = []
+        for device, name in renames:
+            old_name, device.name = device.name, name
+            try:
+                device.validated_save()
+            except (DjangoBaseDBError, ValidationError) as err:
+                self.job.logger.error("Unable to rename the stack Device %s to %s. Error: %s", old_name, name, err)
+                continue
+            renamed.append(f"{old_name} to {name}")
+        if renamed:
+            self.job.logger.info(
+                "Renamed %d stack Devices to the configured format: %s", len(renamed), ", ".join(renamed)
+            )
+
     def load(self):
         """Load data from Nautobot."""
+        self.rename_stack_devices()
         self.load_data()

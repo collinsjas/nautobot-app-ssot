@@ -38,6 +38,16 @@ SAFE_DELETE_VLAN_STATUS = CONFIG.get("ipfabric_safe_delete_vlan_status", "Deprec
 SAFE_DELETE_IPADDRESS_STATUS = CONFIG.get("ipfabric_safe_delete_ipaddress_status", "Deprecated")
 SAFE_DELETE_CABLE_STATUS = CONFIG.get("ipfabric_safe_delete_cable_status", "Decommissioning")
 SAFE_DELETE_VRF_STATUS = CONFIG.get("ipfabric_safe_delete_vrf_status", "Deprecated")
+SAFE_DELETE_PREFIX_STATUS = CONFIG.get("ipfabric_safe_delete_prefix_status", "Deprecated")
+# The Tags marking what this sync wrote and what Safe Delete Mode set aside. Configurable so that two
+# IP Fabric instances, or another system, can each mark their own objects in one Nautobot.
+DEFAULT_SYNCED_TAG_NAME = "SSoT Synced from IPFabric"
+SYNCED_TAG_NAME = CONFIG.get("ipfabric_synced_tag", DEFAULT_SYNCED_TAG_NAME)
+SAFE_DELETE_TAG_NAME = CONFIG.get("ipfabric_safe_delete_tag", "SSoT Safe Delete")
+# How the Devices of a stack are named, from the stack's IP Fabric hostname and each member's number.
+# See `utilities.utils.stack_device_name`.
+STACK_MEMBER_NAME = CONFIG.get("ipfabric_stack_member_name", "{hostname}-member{member}")
+STACK_MASTER_NAME = CONFIG.get("ipfabric_stack_master_name", "{hostname}")
 # The serial IP Fabric keys a Device on, which is not what Nautobot's `serial` means. Nautobot
 # documents that field as the chassis serial, which IP Fabric reports separately as `snHw`. Recorded
 # beside the Device so the two are not confused, and so the key a run matched on stays visible.
