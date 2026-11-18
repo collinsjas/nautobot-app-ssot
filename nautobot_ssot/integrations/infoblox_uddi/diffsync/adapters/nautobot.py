@@ -168,8 +168,10 @@ class NautobotAdapter(DiffSync):
 
     def load(self):
         """Load data from Nautobot."""
-        self.load_prefixes()
-        self.load_ip_addresses()
+        if self.config.import_prefixes:
+            self.load_prefixes()
+        if self.config.import_ip_addresses:
+            self.load_ip_addresses()
         if self.config.import_ip_ranges:
             self.load_ip_ranges()
         if self.config.import_dns_zones:

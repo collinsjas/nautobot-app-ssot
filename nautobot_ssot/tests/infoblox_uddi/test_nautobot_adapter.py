@@ -36,6 +36,9 @@ class NautobotAdapterTestCase(TestCase):
             (),
             {
                 "default_namespace_id": self.namespace.id,
+                "import_prefixes": True,
+                "import_ip_addresses": True,
+                "import_ip_ranges": False,
                 "import_dns_zones": True,
                 "import_dns_records": True,
                 "safe_delete_mode": True,
@@ -59,6 +62,19 @@ class NautobotAdapterTestCase(TestCase):
         self.assertEqual(ipaddrs[0].address, "10.0.0.5")
         self.assertEqual(ipaddrs[0].prefix_length, 24)
         self.assertEqual(ipaddrs[0].dns_name, "host1.example.com")
+
+    def test_load_respects_ipam_import_switches(self):
+        """Exclude disabled IPAM types while still loading the enabled type."""
+        self.config.import_dns_zones = False
+        self.config.import_dns_records = False
+        for import_prefixes in (True, False):
+            with self.subTest(import_prefixes=import_prefixes):
+                self.config.import_prefixes = import_prefixes
+                self.config.import_ip_addresses = not import_prefixes
+                adapter = NautobotAdapter(config=self.config)
+                adapter.load()
+                self.assertEqual(len(adapter.get_all("prefix")), int(import_prefixes))
+                self.assertEqual(len(adapter.get_all("ipaddress")), int(not import_prefixes))
 
     def test_load_dns_zones_noop_without_dns_models(self):
         """Validate loading DNS Zones is a no-op when `nautobot-dns-models` isn't installed."""
