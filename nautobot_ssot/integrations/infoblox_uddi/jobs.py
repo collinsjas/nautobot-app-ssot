@@ -15,6 +15,7 @@ from nautobot.ipam.models import IPAddress, IPAddressRange, Prefix
 from nautobot_ssot.jobs.base import DataMapping, DataSource
 from nautobot_ssot.utils import validate_dns_models_installed
 
+from .constant import DNS_OWNER_FIELD
 from .diffsync.adapters import infoblox_uddi, nautobot
 from .diffsync.adapters.nautobot import SYNC_TAG_NAME
 from .diffsync.models.nautobot import claim_ownership, get_conflicting_ownership_tags
@@ -187,6 +188,8 @@ class InfobloxUDDIBrownfieldAdoption(Job):
         tag = Tag.objects.filter(name=SYNC_TAG_NAME).first()
         matching = []
         mask_changes = {}
+        dns_zones = []
+        dns_matches = []
 
         if config.import_prefixes:
             source_keys = {(item.network, item.namespace) for item in source_adapter.get_all("prefix")}
@@ -234,10 +237,17 @@ class InfobloxUDDIBrownfieldAdoption(Job):
             )
 
         if (config.import_dns_zones or config.import_dns_records) and validate_dns_models_installed():
-            matching.extend(self._get_dns_matches(source_adapter, tag, config))
+            if not config.import_dns_zones:
+                source_adapter.load_dns_zones()
+            dns_zones, dns_matches = self._get_dns_matches(source_adapter, tag, config)
+            matching.extend(dns_matches)
+            if config.import_dns_zones:
+                matching.extend(dns_zones)
+            for zone in dns_zones:
+                self.logger.info("Matching DNS zone for ownership: %s (view %s)", zone, _dns_view_name(zone))
 
         self.logger.info(
-            "Found %d untagged Nautobot objects matching Infoblox Universal DDI.",
+            "Found %d Nautobot objects eligible for Infoblox Universal DDI tagging.",
             len(matching),
         )
         for obj in matching:
@@ -251,7 +261,7 @@ class InfobloxUDDIBrownfieldAdoption(Job):
         if not apply_tags:
             self.logger.info("Preview only; no tags were applied. Enable 'Apply tags' to adopt these objects.")
             return
-        if not matching:
+        if not matching and not dns_zones:
             self.logger.info("No matching untagged objects found; no tags were applied.")
             return
 
@@ -264,6 +274,21 @@ class InfobloxUDDIBrownfieldAdoption(Job):
                         "description": "Objects managed by Infoblox Universal DDI SSoT.",
                     },
                 )
+            owner = str(config.pk)
+            eligible_zone_ids = set()
+            for zone in sorted(dns_zones, key=lambda item: item.pk):
+                locked_zone = type(zone).objects.select_for_update().get(pk=zone.pk)
+                current_owner = locked_zone._custom_field_data.get(DNS_OWNER_FIELD)
+                if current_owner and current_owner != owner:
+                    self.logger.warning("DNS zone %s is owned by another configuration. Skipping.", locked_zone)
+                    continue
+                if not current_owner:
+                    locked_zone._custom_field_data[DNS_OWNER_FIELD] = owner
+                    locked_zone.save(update_fields=["_custom_field_data"])
+                eligible_zone_ids.add(zone.pk)
+            blocked_dns_objects = {zone for zone in dns_zones if zone.pk not in eligible_zone_ids}
+            blocked_dns_objects.update(record for record in dns_matches if record.zone_id not in eligible_zone_ids)
+            matching = [obj for obj in matching if obj not in blocked_dns_objects]
             content_types = {ContentType.objects.get_for_model(obj, for_concrete_model=False) for obj in matching}
             tag.content_types.add(*content_types)
             for obj in matching:
@@ -290,17 +315,20 @@ class InfobloxUDDIBrownfieldAdoption(Job):
         )
 
         source_zones = list(source_adapter.get_all("dnszone"))
-        matches = []
-        if config.import_dns_zones:
-            matches.extend(
-                self._get_untagged_matches(
-                    DNSZone.objects.select_related("dns_view").filter(name__in={zone.name for zone in source_zones}),
-                    tag,
-                    {(zone.name, zone.view) for zone in source_zones if zone.view},
-                    lambda obj: (obj.name, _dns_view_name(obj)),
-                )
-            )
+        source_zone_keys = {(zone.name, zone.view) for zone in source_zones if zone.view}
+        owner = str(config.pk)
+        zones = []
+        for zone in DNSZone.objects.select_related("dns_view").filter(
+            name__in={name for name, _ in source_zone_keys}
+        ):
+            if (zone.name, _dns_view_name(zone)) not in source_zone_keys:
+                continue
+            if zone._custom_field_data.get(DNS_OWNER_FIELD) not in (None, "", owner):
+                self.logger.warning("DNS zone %s is owned by another configuration. Skipping.", zone)
+                continue
+            zones.append(zone)
 
+        matches = []
         record_models = (
             ("dnsarecord", ARecord),
             ("dnsaaaarecord", AAAARecord),
@@ -322,14 +350,14 @@ class InfobloxUDDIBrownfieldAdoption(Job):
                 self._get_untagged_matches(
                     orm_model.objects.select_related(*related_fields).filter(
                         name__in={record.name for record in source_records},
-                        zone__name__in={record.zone for record in source_records},
+                        zone_id__in={zone.pk for zone in zones},
                     ),
                     tag,
                     source_keys,
                     lambda obj: (*_dns_record_identity(obj, model_name, source=False), _dns_view_name(obj.zone)),
                 )
             )
-        return matches
+        return zones, matches
 
 
 jobs = [InfobloxUDDIDataSource, InfobloxUDDIBrownfieldAdoption]

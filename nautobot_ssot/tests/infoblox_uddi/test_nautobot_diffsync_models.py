@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest import mock
 
+from diffsync import Adapter
 from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from nautobot.extras.models import Status, Tag
@@ -16,12 +17,12 @@ def _fake_adapter(namespace_id, safe_delete_mode=True):
         name="SSoT Synced from Infoblox Universal DDI", defaults={"name": "SSoT Synced from Infoblox Universal DDI"}
     )
     sync_tag.content_types.add(ContentType.objects.get_for_model(Prefix), ContentType.objects.get_for_model(IPAddress))
-    return SimpleNamespace(
-        namespace_id=namespace_id,
-        sync_tag=sync_tag,
-        config=SimpleNamespace(safe_delete_mode=safe_delete_mode),
-        job=mock.Mock(),
-    )
+    adapter = Adapter()
+    adapter.namespace_id = namespace_id
+    adapter.sync_tag = sync_tag
+    adapter.config = SimpleNamespace(safe_delete_mode=safe_delete_mode)
+    adapter.job = mock.Mock()
+    return adapter
 
 
 class PrefixModelTestCase(TestCase):
@@ -76,6 +77,7 @@ class IPAddressModelTestCase(TestCase):
         self.status = Status.objects.get(name="Active")
         deprecated_status, _ = Status.objects.get_or_create(name="Deprecated")
         deprecated_status.content_types.add(ContentType.objects.get_for_model(IPAddress))
+        Prefix.objects.create(prefix="192.0.2.0/24", namespace=self.namespace, type="network", status=self.status)
         self.adapter = _fake_adapter(self.namespace.id)
 
     def test_create(self):
@@ -98,6 +100,7 @@ class DnsARecordFallbackTestCase(TestCase):
         """Set up test data."""
         self.namespace, _ = Namespace.objects.get_or_create(name="InfobloxUDDIDnsFallbackUnitTest")
         self.status = Status.objects.get(name="Active")
+        Prefix.objects.create(prefix="192.0.2.0/24", namespace=self.namespace, type="network", status=self.status)
         self.ipaddr = IPAddress.objects.create(
             address="192.0.2.10/24", namespace=self.namespace, status=self.status
         )
@@ -109,7 +112,7 @@ class DnsARecordFallbackTestCase(TestCase):
         mock_validate.return_value = False
         nb_models.DnsARecord.create(
             self.adapter,
-            {"name": "host10", "zone": "example.com.", "address": "192.0.2.10"},
+            {"name": "host10", "zone": "example.com.", "view": "default", "address": "192.0.2.10"},
             {"ttl": 300},
         )
         self.ipaddr.refresh_from_db()
@@ -130,7 +133,7 @@ class DnsCnameRecordFallbackTestCase(TestCase):
         mock_validate.return_value = False
         nb_models.DnsCnameRecord.create(
             self.adapter,
-            {"name": "alias1", "zone": "example.com."},
-            {"alias": "host1.example.com.", "ttl": 300},
+            {"name": "alias1", "zone": "example.com.", "view": "default", "alias": "host1.example.com."},
+            {"ttl": 300},
         )
         self.adapter.job.logger.warning.assert_called_once()

@@ -30,8 +30,8 @@ class ListAllPaginationTestCase(unittest.TestCase):
         """Validate `_list_all_paged` stops once `total_size` items have been yielded."""
         all_items = list(range(5))
 
-        def fake_list(_offset=0, _limit=2, **_kwargs):
-            chunk = all_items[_offset : _offset + _limit]
+        def fake_list(offset=0, limit=2, **_kwargs):
+            chunk = all_items[offset : offset + limit]
             return FakeResponse(results=chunk, page=FakePage(total_size=len(all_items)))
 
         results = list(InfobloxUDDIApi._list_all_paged(fake_list, limit=2))
@@ -41,8 +41,8 @@ class ListAllPaginationTestCase(unittest.TestCase):
         """Validate `_list_all_offset_only` stops once a short page is returned."""
         all_items = list(range(5))
 
-        def fake_list(_offset=0, _limit=2, **_kwargs):
-            chunk = all_items[_offset : _offset + _limit]
+        def fake_list(offset=0, limit=2, **_kwargs):
+            chunk = all_items[offset : offset + limit]
             return FakeResponse(results=chunk)
 
         results = list(InfobloxUDDIApi._list_all_offset_only(fake_list, limit=2))
@@ -51,7 +51,7 @@ class ListAllPaginationTestCase(unittest.TestCase):
     def test_list_all_empty_results(self):
         """Validate pagination helpers handle an empty result set without error."""
 
-        def fake_list(_offset=0, _limit=2, **_kwargs):
+        def fake_list(**_kwargs):
             return FakeResponse(results=[])
 
         self.assertEqual(list(InfobloxUDDIApi._list_all_paged(fake_list, limit=2)), [])

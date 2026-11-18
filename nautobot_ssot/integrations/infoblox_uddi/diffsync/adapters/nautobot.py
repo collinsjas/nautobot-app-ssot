@@ -9,6 +9,7 @@ from nautobot.ipam.models import Prefix as OrmPrefix
 
 from nautobot_ssot.utils import validate_dns_models_installed
 
+from ...constant import DNS_OWNER_FIELD
 from ...models import SSOTInfobloxUDDIConfig
 from ..models import nautobot as nb_models
 
@@ -45,6 +46,8 @@ class NautobotAdapter(DiffSync):
         self.sync = sync
         self.config = config
         self.namespace_id = config.default_namespace_id if config else None
+        self.dns_owner_filter = {f"_custom_field_data__{DNS_OWNER_FIELD}": str(config.pk)} if config else {}
+        self.dns_record_owner_filter = {f"zone__{key}": value for key, value in self.dns_owner_filter.items()}
         self.sync_tag, _ = Tag.objects.get_or_create(name=SYNC_TAG_NAME, defaults={"name": SYNC_TAG_NAME})
 
     def load_prefixes(self):
@@ -99,7 +102,7 @@ class NautobotAdapter(DiffSync):
             return
         from nautobot_dns_models.models import DNSZone  # pylint: disable=import-outside-toplevel
 
-        for zone in DNSZone.objects.select_related("dns_view").filter(tags=self.sync_tag):
+        for zone in DNSZone.objects.select_related("dns_view").filter(tags=self.sync_tag, **self.dns_owner_filter):
             new_zone = self.dnszone(name=zone.name, ttl=zone.ttl, view=zone.dns_view.name)
             try:
                 self.add(new_zone)
@@ -117,7 +120,9 @@ class NautobotAdapter(DiffSync):
             PTRRecord,
         )
 
-        for record in ARecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
+        for record in ARecord.objects.select_related("zone__dns_view").filter(
+            tags=self.sync_tag, **self.dns_record_owner_filter
+        ):
             new_record = self.dnsarecord(
                 name=record.name,
                 zone=record.zone.name,
@@ -129,7 +134,9 @@ class NautobotAdapter(DiffSync):
                 self.add(new_record)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate DNS A record found: {new_record}.")
-        for record in AAAARecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
+        for record in AAAARecord.objects.select_related("zone__dns_view").filter(
+            tags=self.sync_tag, **self.dns_record_owner_filter
+        ):
             new_record = self.dnsaaaarecord(
                 name=record.name,
                 zone=record.zone.name,
@@ -141,7 +148,9 @@ class NautobotAdapter(DiffSync):
                 self.add(new_record)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate DNS AAAA record found: {new_record}.")
-        for record in CNAMERecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
+        for record in CNAMERecord.objects.select_related("zone__dns_view").filter(
+            tags=self.sync_tag, **self.dns_record_owner_filter
+        ):
             new_record = self.dnscnamerecord(
                 name=record.name,
                 zone=record.zone.name,
@@ -153,7 +162,9 @@ class NautobotAdapter(DiffSync):
                 self.add(new_record)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate DNS CNAME record found: {new_record}.")
-        for record in PTRRecord.objects.select_related("zone__dns_view").filter(tags=self.sync_tag):
+        for record in PTRRecord.objects.select_related("zone__dns_view").filter(
+            tags=self.sync_tag, **self.dns_record_owner_filter
+        ):
             new_record = self.dnsptrrecord(
                 name=record.name,
                 zone=record.zone.name,

@@ -6,7 +6,12 @@ from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 from diffsync import Adapter
+from django.apps import apps
+from django.test import TestCase
+from nautobot.extras.models import CustomField
 
+from nautobot_ssot.integrations.infoblox_uddi.constant import DNS_OWNER_FIELD
+from nautobot_ssot.integrations.infoblox_uddi.diffsync.adapters.nautobot import NautobotAdapter
 from nautobot_ssot.integrations.infoblox_uddi.diffsync.models import nautobot as nb_models
 
 
@@ -47,19 +52,25 @@ class DnsViewLookupTestCase(unittest.TestCase):
         self.adapter.sync_tag = mock.Mock()
         self.adapter.job = mock.Mock()
         self.adapter.namespace_id = "ns"
-        self.adapter.config = SimpleNamespace(safe_delete_mode=False)
+        self.adapter.config = SimpleNamespace(safe_delete_mode=False, pk="config-a")
+        self.adapter.dns_owner_filter = {f"_custom_field_data__{DNS_OWNER_FIELD}": "config-a"}
+        self.adapter.dns_record_owner_filter = {f"zone___custom_field_data__{DNS_OWNER_FIELD}": "config-a"}
 
     def test_zone_is_created_in_its_own_view(self):
         """The same zone name in another view must not match an existing zone."""
         external = object()
         self.models.DNSView.objects.get_or_create.return_value = (external, True)
-        self.models.DNSZone.objects.get_or_create.return_value = (mock.Mock(), True)
+        self.models.DNSZone.objects.get_or_create.return_value = (
+            mock.Mock(_custom_field_data={DNS_OWNER_FIELD: "config-a"}), True
+        )
 
         nb_models.DnsZone.create(self.adapter, {"name": "schneider.com.", "view": "external"}, {"ttl": 600})
 
         self.models.DNSView.objects.get_or_create.assert_called_once_with(name="external")
         self.models.DNSZone.objects.get_or_create.assert_called_once_with(
-            defaults={"ttl": 600}, name="schneider.com.", dns_view=external
+            defaults={"ttl": 600, "_custom_field_data": {DNS_OWNER_FIELD: "config-a"}},
+            name="schneider.com.",
+            dns_view=external,
         )
 
     def test_a_record_uses_the_zone_of_its_view(self):
@@ -76,7 +87,9 @@ class DnsViewLookupTestCase(unittest.TestCase):
                 {"ttl": 300},
             )
 
-        self.models.DNSZone.objects.filter.assert_called_once_with(name="schneider.com.", dns_view__name="external")
+        self.models.DNSZone.objects.filter.assert_called_once_with(
+            name="schneider.com.", dns_view__name="external", **self.adapter.dns_owner_filter
+        )
         self.models.ARecord.objects.get_or_create.assert_called_once_with(
             name="host1", zone=external_zone, ip_address=ip_address, defaults={"_ttl": 300}
         )
@@ -101,6 +114,52 @@ class DnsViewLookupTestCase(unittest.TestCase):
             record.delete()
 
         self.models.ARecord.objects.filter.assert_called_once_with(
-            name="host1", zone__name="schneider.com.", zone__dns_view__name="external", ip_address__host="10.0.0.5"
+            name="host1",
+            zone__name="schneider.com.",
+            zone__dns_view__name="external",
+            ip_address__host="10.0.0.5",
+            **self.adapter.dns_record_owner_filter,
         )
         safe_delete.assert_called_once()
+
+    def test_existing_zone_owned_by_another_configuration_is_skipped(self):
+        """A matching zone identity does not allow a sync to take over another owner's zone."""
+        zone = mock.Mock(_custom_field_data={DNS_OWNER_FIELD: "config-b"})
+        self.models.DNSView.objects.get_or_create.return_value = (object(), False)
+        self.models.DNSZone.objects.get_or_create.return_value = (zone, False)
+
+        result = nb_models.DnsZone.create(
+            self.adapter, {"name": "schneider.com.", "view": "external"}, {"ttl": 600}
+        )
+
+        self.assertIsNone(result)
+        zone.tags.add.assert_not_called()
+        self.adapter.job.logger.warning.assert_called_once()
+
+
+@unittest.skipUnless(apps.is_installed("nautobot_dns_models"), "DNS Models app is optional")
+class DnsOwnershipDatabaseTestCase(TestCase):
+    """Verify zone ownership and inherited record ownership using the actual DNS models."""
+
+    def test_target_only_loads_dns_objects_owned_by_its_configuration(self):
+        """Matching tags alone do not put another configuration's objects in scope."""
+        from nautobot_dns_models.models import CNAMERecord, DNSView, DNSZone  # pylint: disable=import-outside-toplevel
+
+        config = SimpleNamespace(pk="config-a", default_namespace_id=None)
+        adapter = NautobotAdapter(config=config)
+        field = CustomField.objects.get(key=DNS_OWNER_FIELD)
+        self.assertTrue(field.content_types.filter(model="dnszone").exists())
+        view = DNSView.objects.create(name="ownership-test")
+        for name, owner in (("owned.example", "config-a"), ("foreign.example", "config-b"), ("legacy.example", None)):
+            zone = DNSZone.objects.create(
+                name=name, dns_view=view, _custom_field_data={DNS_OWNER_FIELD: owner} if owner else {}
+            )
+            zone.tags.add(adapter.sync_tag)
+            record = CNAMERecord.objects.create(name="www", alias="host.example", zone=zone)
+            record.tags.add(adapter.sync_tag)
+
+        adapter.load_dns_zones()
+        adapter.load_dns_records()
+
+        self.assertEqual([zone.name for zone in adapter.get_all("dnszone")], ["owned.example"])
+        self.assertEqual([record.zone for record in adapter.get_all("dnscnamerecord")], ["owned.example"])

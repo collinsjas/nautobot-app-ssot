@@ -1,5 +1,8 @@
 """Infoblox Universal DDI config model tests."""
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 from nautobot.extras.choices import SecretsGroupAccessTypeChoices, SecretsGroupSecretTypeChoices
@@ -14,10 +17,14 @@ class SSOTInfobloxUDDIConfigTestCase(TestCase):
 
     def setUp(self):
         """Setup testing."""
+        token_directory = TemporaryDirectory()
+        self.addCleanup(token_directory.cleanup)
+        token_file = Path(token_directory.name) / "token"
+        token_file.write_text("test-token", encoding="utf-8")
         self.secrets_group, _ = SecretsGroup.objects.get_or_create(name="InfobloxUDDISSOTUnitTest")
         token_secret, _ = Secret.objects.get_or_create(
             name="Infoblox UDDI Token - InfobloxUDDISSOTUnitTest",
-            defaults={"provider": "text-file", "parameters": {"path": "/dev/null"}},
+            defaults={"provider": "text-file", "parameters": {"path": str(token_file)}},
         )
         SecretsGroupAssociation.objects.get_or_create(
             secrets_group=self.secrets_group,

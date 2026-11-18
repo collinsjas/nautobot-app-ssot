@@ -13,6 +13,7 @@ from nautobot.extras.models import Status, Tag
 
 from nautobot_ssot.utils import validate_dns_models_installed
 
+from ...constant import DNS_OWNER_FIELD
 from . import base
 
 SAFE_DELETE_STATUS = "Deprecated"
@@ -219,6 +220,13 @@ class IPAddressRange(base.IPAddressRange):
         return super().delete()
 
 
+def _owned_dns_zone(model, adapter, name, view):
+    zone = model.objects.filter(name=name, dns_view__name=view, **adapter.dns_owner_filter).first()
+    if zone is None:
+        adapter.job.logger.warning("DNS zone %s in view %s is unavailable for this configuration.", name, view)
+    return zone
+
+
 class DnsZone(base.DnsZone):
     """Nautobot ORM-backed DNS Zone model.
 
@@ -234,7 +242,10 @@ class DnsZone(base.DnsZone):
 
             # `ttl` is NOT NULL on DNSZone; omit it from defaults (letting the model's own
             # default apply) rather than forcing an explicit None when the source has no TTL.
-            defaults = {}
+            if not ids["view"]:
+                return None
+            owner = str(adapter.config.pk)
+            defaults = {"_custom_field_data": {DNS_OWNER_FIELD: owner}}
             if attrs.get("ttl") is not None:
                 defaults["ttl"] = attrs["ttl"]
             # dns_view is part of the real (name, dns_view) uniqueness - included in the lookup,
@@ -245,11 +256,19 @@ class DnsZone(base.DnsZone):
                 lookup["dns_view"] = dns_view
             try:
                 zone, _ = OrmDNSZone.objects.get_or_create(defaults=defaults, **lookup)
+                if zone._custom_field_data.get(DNS_OWNER_FIELD) != owner:
+                    adapter.job.logger.warning(
+                        "DNS zone %s in view %s is unowned or owned by another configuration. Skipping.",
+                        ids["name"],
+                        ids["view"],
+                    )
+                    return None
                 zone.tags.add(adapter.sync_tag)
             except Exception as error:  # pylint: disable=broad-except
                 # Guard against unexpected AuthZone name collisions within the same DNS View
                 # rather than letting an unhandled IntegrityError abort the whole sync.
                 adapter.job.logger.error("Failed to create DNS Zone %s: %s. Skipping.", ids["name"], error)
+                return None
         else:
             adapter.job.logger.debug(
                 "nautobot-dns-models not installed; skipping DNS Zone %s (no-op in fallback mode).", ids["name"]
@@ -261,7 +280,7 @@ class DnsZone(base.DnsZone):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = OrmDNSZone.objects.filter(name=self.name, dns_view__name=self.view).first()
+            zone = _owned_dns_zone(OrmDNSZone, self.adapter, self.name, self.view)
             if zone:
                 update_fields = []
                 if attrs.get("ttl") is not None and zone.ttl != attrs["ttl"]:
@@ -279,8 +298,15 @@ class DnsZone(base.DnsZone):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone as OrmDNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = OrmDNSZone.objects.filter(name=self.name, dns_view__name=self.view).first()
+            zone = _owned_dns_zone(OrmDNSZone, self.adapter, self.name, self.view)
             if zone:
+                if not self.adapter.config.safe_delete_mode and any(
+                    relation.related_model._base_manager.filter(zone=zone).exists()
+                    for relation in zone._meta.related_objects
+                    if relation.one_to_many and relation.field.name == "zone"
+                ):
+                    self.adapter.job.logger.warning("DNS zone %s still has records. Skipping hard deletion.", zone)
+                    return None
                 _safe_delete_or_hard_delete(zone, self.adapter.config.safe_delete_mode)
         return super().delete()
 
@@ -298,11 +324,13 @@ class DnsARecord(base.DnsARecord):
             from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
             from nautobot_dns_models.models import ARecord, DNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
+            zone = _owned_dns_zone(DNSZone, adapter, ids["zone"], ids["view"])
             ip_address = OrmIPAddress.objects.filter(
                 host=ids["address"], parent__namespace_id=adapter.namespace_id
             ).first()
-            if zone and ip_address:
+            if zone is None:
+                return None
+            if ip_address:
                 defaults = {}
                 if attrs.get("ttl") is not None:
                     defaults["_ttl"] = attrs["ttl"]
@@ -327,7 +355,11 @@ class DnsARecord(base.DnsARecord):
             from nautobot_dns_models.models import ARecord  # pylint: disable=import-outside-toplevel
 
             record = ARecord.objects.filter(
-                name=self.name, zone__name=self.zone, zone__dns_view__name=self.view, ip_address__host=self.address
+                name=self.name,
+                zone__name=self.zone,
+                zone__dns_view__name=self.view,
+                ip_address__host=self.address,
+                **self.adapter.dns_record_owner_filter,
             ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
@@ -347,11 +379,13 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
             from nautobot.ipam.models import IPAddress as OrmIPAddress  # pylint: disable=import-outside-toplevel
             from nautobot_dns_models.models import AAAARecord, DNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
+            zone = _owned_dns_zone(DNSZone, adapter, ids["zone"], ids["view"])
             ip_address = OrmIPAddress.objects.filter(
                 host=ids["address"], parent__namespace_id=adapter.namespace_id
             ).first()
-            if zone and ip_address:
+            if zone is None:
+                return None
+            if ip_address:
                 defaults = {}
                 if attrs.get("ttl") is not None:
                     defaults["_ttl"] = attrs["ttl"]
@@ -376,7 +410,11 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
             from nautobot_dns_models.models import AAAARecord  # pylint: disable=import-outside-toplevel
 
             record = AAAARecord.objects.filter(
-                name=self.name, zone__name=self.zone, zone__dns_view__name=self.view, ip_address__host=self.address
+                name=self.name,
+                zone__name=self.zone,
+                zone__dns_view__name=self.view,
+                ip_address__host=self.address,
+                **self.adapter.dns_record_owner_filter,
             ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
@@ -395,18 +433,19 @@ class DnsCnameRecord(base.DnsCnameRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import CNAMERecord, DNSZone  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
-            if zone:
-                defaults = {}
-                if attrs.get("ttl") is not None:
-                    defaults["_ttl"] = attrs["ttl"]
-                try:
-                    record, _ = CNAMERecord.objects.get_or_create(
-                        name=ids["name"], alias=ids["alias"], zone=zone, defaults=defaults
-                    )
-                    record.tags.add(adapter.sync_tag)
-                except Exception as error:  # pylint: disable=broad-except
-                    adapter.job.logger.error("Failed to create DNS CNAME record %s: %s. Skipping.", ids["name"], error)
+            zone = _owned_dns_zone(DNSZone, adapter, ids["zone"], ids["view"])
+            if zone is None:
+                return None
+            defaults = {}
+            if attrs.get("ttl") is not None:
+                defaults["_ttl"] = attrs["ttl"]
+            try:
+                record, _ = CNAMERecord.objects.get_or_create(
+                    name=ids["name"], alias=ids["alias"], zone=zone, defaults=defaults
+                )
+                record.tags.add(adapter.sync_tag)
+            except Exception as error:  # pylint: disable=broad-except
+                adapter.job.logger.error("Failed to create DNS CNAME record %s: %s. Skipping.", ids["name"], error)
         else:
             adapter.job.logger.warning(
                 "nautobot-dns-models not installed; skipping CNAME record %s -> %s (not representable "
@@ -422,7 +461,8 @@ class DnsCnameRecord(base.DnsCnameRecord):
             from nautobot_dns_models.models import CNAMERecord  # pylint: disable=import-outside-toplevel
 
             record = CNAMERecord.objects.filter(
-                name=self.name, alias=self.alias, zone__name=self.zone, zone__dns_view__name=self.view
+                name=self.name, alias=self.alias, zone__name=self.zone, zone__dns_view__name=self.view,
+                **self.adapter.dns_record_owner_filter,
             ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)
@@ -441,18 +481,19 @@ class DnsPtrRecord(base.DnsPtrRecord):
         if validate_dns_models_installed():
             from nautobot_dns_models.models import DNSZone, PTRRecord  # pylint: disable=import-outside-toplevel
 
-            zone = DNSZone.objects.filter(name=ids["zone"], dns_view__name=ids["view"]).first()
-            if zone:
-                defaults = {}
-                if attrs.get("ttl") is not None:
-                    defaults["_ttl"] = attrs["ttl"]
-                try:
-                    record, _ = PTRRecord.objects.get_or_create(
-                        name=ids["name"], ptrdname=ids["ptrdname"], zone=zone, defaults=defaults
-                    )
-                    record.tags.add(adapter.sync_tag)
-                except Exception as error:  # pylint: disable=broad-except
-                    adapter.job.logger.error("Failed to create DNS PTR record %s: %s. Skipping.", ids["name"], error)
+            zone = _owned_dns_zone(DNSZone, adapter, ids["zone"], ids["view"])
+            if zone is None:
+                return None
+            defaults = {}
+            if attrs.get("ttl") is not None:
+                defaults["_ttl"] = attrs["ttl"]
+            try:
+                record, _ = PTRRecord.objects.get_or_create(
+                    name=ids["name"], ptrdname=ids["ptrdname"], zone=zone, defaults=defaults
+                )
+                record.tags.add(adapter.sync_tag)
+            except Exception as error:  # pylint: disable=broad-except
+                adapter.job.logger.error("Failed to create DNS PTR record %s: %s. Skipping.", ids["name"], error)
         else:
             adapter.job.logger.debug(
                 "nautobot-dns-models not installed; skipping PTR record %s (no-op in fallback mode).", ids["name"]
@@ -465,7 +506,8 @@ class DnsPtrRecord(base.DnsPtrRecord):
             from nautobot_dns_models.models import PTRRecord  # pylint: disable=import-outside-toplevel
 
             record = PTRRecord.objects.filter(
-                name=self.name, ptrdname=self.ptrdname, zone__name=self.zone, zone__dns_view__name=self.view
+                name=self.name, ptrdname=self.ptrdname, zone__name=self.zone, zone__dns_view__name=self.view,
+                **self.adapter.dns_record_owner_filter,
             ).first()
             if record:
                 _safe_delete_or_hard_delete(record, self.adapter.config.safe_delete_mode)

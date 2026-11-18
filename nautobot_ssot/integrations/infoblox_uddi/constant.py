@@ -4,3 +4,5 @@ TAG_COLOR = "40bfae"
 
 # Default set of DNS record types synced when a config doesn't override `dns_record_types`.
 DEFAULT_DNS_RECORD_TYPES = ["A", "AAAA", "CNAME", "PTR"]
+
+DNS_OWNER_FIELD = "ssot_infoblox_uddi_dns_owner"

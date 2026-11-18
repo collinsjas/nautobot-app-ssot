@@ -35,6 +35,7 @@ class NautobotAdapterTestCase(TestCase):
             "FakeConfig",
             (),
             {
+                "pk": self.namespace.id,
                 "default_namespace_id": self.namespace.id,
                 "import_prefixes": True,
                 "import_ip_addresses": True,

@@ -29,6 +29,12 @@ DNS sync automatically selects one of two modes at the start of every job run, l
 
 This integration currently supports mapping a single configured BloxOne IP Space to a single configured Nautobot Namespace. Multi-IP-Space mapping is planned for a future phase.
 
+## DNS Zone Ownership
+
+With `nautobot-dns-models` installed, **UDDI DNS Owner** on each managed zone stores the UUID of its Nautobot sync configuration. Records inherit the zone's ownership for reconciliation. If two portals report the same zone name in the same DNS view, only the owning configuration can sync that zone and its records.
+
+For an existing zone with no owner, preview the brownfield adoption job using the intended configuration, then enable **Apply tags** to assign ownership. Verify the zone, view, and portal before applying. Assigning a zone owner also brings its previously UDDI-tagged records into that configuration's reconciliation scope. Review the next sync in dry-run mode before applying changes.
+
 ## Brownfield Adoption
 
 The regular sync only manages Nautobot objects tagged `SSoT Synced from Infoblox Universal DDI`. To adopt existing records, run the **Infoblox Universal DDI Brownfield Adoption** job with the configuration whose IP Space and Namespace define the intended ownership scope.
@@ -41,7 +47,7 @@ Infoblox Universal DDI is treated as the source of truth for everything it impor
 - When a record is adopted, tags that mark it as owned by another system (`SSoT Synced from ...`) and the `SSoT Safe Delete` tag are removed, so the Infoblox Universal DDI tag is the only SSoT ownership tag. The preview lists which tags would be removed. Run the sync afterwards to align the status and other attributes.
 - The regular sync applies the same rule when it has to create an IP Address that already exists in the Namespace, for example with another mask or another system's tags: the existing record is updated and taken over instead of causing a duplicate error.
 
-After tagging, run the regular sync in dry-run mode and review its proposed changes before applying them. The adoption job does not create, update, or delete Nautobot objects; it only applies the sync tag to matching existing objects.
+After tagging, run the regular sync in dry-run mode and review its proposed changes before applying them. Adoption can set zone ownership, correct IP address masks, and change ownership tags on matching Nautobot objects.
 
 ## Deletion Behavior
 

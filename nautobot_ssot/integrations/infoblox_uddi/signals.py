@@ -4,7 +4,7 @@ from django.conf import settings
 from nautobot.core.signals import nautobot_database_ready
 from nautobot.extras.choices import CustomFieldTypeChoices
 
-from nautobot_ssot.integrations.infoblox_uddi.constant import TAG_COLOR
+from nautobot_ssot.integrations.infoblox_uddi.constant import DNS_OWNER_FIELD, TAG_COLOR
 
 config = settings.PLUGINS_CONFIG["nautobot_ssot"]
 
@@ -73,3 +73,13 @@ def nautobot_database_ready_callback(sender, *, apps, **kwargs):  # pylint: disa
         tag_sync_from_uddi.content_types.add(ContentType.objects.get_for_model(model))
         safe_delete_tag.content_types.add(ContentType.objects.get_for_model(model))
         custom_field.content_types.add(ContentType.objects.get_for_model(model))
+
+    owner_field, _ = CustomField.objects.get_or_create(
+        key=DNS_OWNER_FIELD,
+        defaults={
+            "type": CustomFieldTypeChoices.TYPE_TEXT,
+            "label": "UDDI DNS Owner",
+            "description": "UUID of the Nautobot Infoblox Universal DDI configuration that owns this zone.",
+        },
+    )
+    owner_field.content_types.add(ContentType.objects.get_for_model(DNSZone))

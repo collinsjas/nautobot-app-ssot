@@ -26,7 +26,8 @@ class InfobloxUDDIJobTest(TestCase):
         mappings = jobs.InfobloxUDDIDataSource.data_mappings()
         self.assertEqual("Prefix", mappings[0].target_name)
         self.assertEqual("IP Address", mappings[1].target_name)
-        self.assertEqual("DNS Zone", mappings[2].target_name)
+        self.assertEqual("IP Address Range", mappings[2].target_name)
+        self.assertEqual("DNS Zone", mappings[3].target_name)
 
     def test_brownfield_adoption_matches_only_untagged_source_objects(self):
         """Only matching, untagged Nautobot objects should be returned for adoption."""
