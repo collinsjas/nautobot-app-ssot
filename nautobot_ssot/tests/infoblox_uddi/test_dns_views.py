@@ -8,7 +8,8 @@ from unittest import mock
 from diffsync import Adapter
 from django.apps import apps
 from django.test import TestCase
-from nautobot.extras.models import CustomField
+from nautobot.extras.models import CustomField, Status
+from nautobot.ipam.models import IPAddress, Namespace, Prefix
 
 from nautobot_ssot.integrations.infoblox_uddi.constant import DNS_OWNER_FIELD
 from nautobot_ssot.integrations.infoblox_uddi.diffsync.adapters.nautobot import NautobotAdapter
@@ -143,9 +144,14 @@ class DnsOwnershipDatabaseTestCase(TestCase):
 
     def test_target_only_loads_dns_objects_owned_by_its_configuration(self):
         """Matching tags alone do not put another configuration's objects in scope."""
-        from nautobot_dns_models.models import CNAMERecord, DNSView, DNSZone  # pylint: disable=import-outside-toplevel
+        from nautobot_dns_models.models import (  # pylint: disable=import-outside-toplevel
+            CNAMERecord,
+            DNSView,
+            DNSZone,
+            PTRRecord,
+        )
 
-        config = SimpleNamespace(pk="config-a", default_namespace_id=None)
+        config = SimpleNamespace(pk="config-a", default_namespace_id=None, dns_record_types=["CNAME"])
         adapter = NautobotAdapter(config=config)
         field = CustomField.objects.get(key=DNS_OWNER_FIELD)
         self.assertTrue(field.content_types.filter(model="dnszone").exists())
@@ -158,8 +164,71 @@ class DnsOwnershipDatabaseTestCase(TestCase):
             record = CNAMERecord.objects.create(name="www", alias="host.example", zone=zone)
             record.tags.add(adapter.sync_tag)
 
+        owned_zone = DNSZone.objects.get(name="owned.example")
+        ptr = PTRRecord.objects.create(name="1", ptrdname="host.example", zone=owned_zone)
+        ptr.tags.add(adapter.sync_tag)
+
         adapter.load_dns_zones()
         adapter.load_dns_records()
 
         self.assertEqual([zone.name for zone in adapter.get_all("dnszone")], ["owned.example"])
         self.assertEqual([record.zone for record in adapter.get_all("dnscnamerecord")], ["owned.example"])
+        self.assertEqual(list(adapter.get_all("dnsptrrecord")), [])
+
+        config.dns_record_types = ["PTR"]
+        adapter = NautobotAdapter(config=config)
+        adapter.load_dns_records()
+        self.assertEqual([record.zone for record in adapter.get_all("dnsptrrecord")], ["owned.example"])
+        self.assertEqual(list(adapter.get_all("dnscnamerecord")), [])
+
+    def test_dns_record_updates_persist_and_clear_ttl_overrides(self):
+        """Update all supported record types and keep inherited TTLs stable on reload."""
+        from nautobot_dns_models.models import (  # pylint: disable=import-outside-toplevel
+            AAAARecord,
+            ARecord,
+            CNAMERecord,
+            DNSView,
+            DNSZone,
+            PTRRecord,
+        )
+
+        namespace = Namespace.objects.create(name="DNS TTL test")
+        status = Status.objects.get(name="Active")
+        ipv4_prefix = Prefix.objects.create(prefix="192.0.2.0/24", namespace=namespace, status=status)
+        ipv6_prefix = Prefix.objects.create(prefix="2001:db8::/64", namespace=namespace, status=status)
+        ipv4 = IPAddress.objects.create(address="192.0.2.5/24", parent=ipv4_prefix, status=status)
+        ipv6 = IPAddress.objects.create(address="2001:db8::5/64", parent=ipv6_prefix, status=status)
+        config = SimpleNamespace(
+            pk="config-a", default_namespace_id=namespace.pk, dns_record_types=["A", "AAAA", "CNAME", "PTR"]
+        )
+        adapter = NautobotAdapter(config=config)
+        view = DNSView.objects.create(name="TTL test view")
+        zone = DNSZone.objects.create(
+            name="ttl.example", dns_view=view, ttl=600, _custom_field_data={DNS_OWNER_FIELD: "config-a"}
+        )
+        records = {
+            "dnsarecord": ARecord.objects.create(name="ipv4", zone=zone, ip_address=ipv4, _ttl=300),
+            "dnsaaaarecord": AAAARecord.objects.create(name="ipv6", zone=zone, ip_address=ipv6, _ttl=300),
+            "dnscnamerecord": CNAMERecord.objects.create(name="alias", zone=zone, alias="ipv4.ttl.example", _ttl=300),
+            "dnsptrrecord": PTRRecord.objects.create(name="5", zone=zone, ptrdname="ipv4.ttl.example", _ttl=300),
+        }
+        for record in records.values():
+            record.tags.add(adapter.sync_tag)
+        adapter.load_dns_records()
+
+        for model_name, record in records.items():
+            with self.subTest(model_name=model_name):
+                (loaded_record,) = adapter.get_all(model_name)
+                loaded_record.update({"ttl": 600})
+                record.refresh_from_db()
+                self.assertEqual(record._ttl, 600)
+                loaded_record.update({"ttl": None})
+                record.refresh_from_db()
+                self.assertIsNone(record._ttl)
+                self.assertEqual(record.ttl, 600)
+
+        reloaded = NautobotAdapter(config=config)
+        reloaded.load_dns_records()
+        for model_name in records:
+            (loaded_record,) = reloaded.get_all(model_name)
+            self.assertIsNone(loaded_record.ttl)

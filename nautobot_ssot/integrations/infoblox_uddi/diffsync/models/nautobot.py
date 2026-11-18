@@ -311,6 +311,23 @@ class DnsZone(base.DnsZone):
         return super().delete()
 
 
+def _update_dns_record_ttl(model, record, attrs, **identity):
+    """Persist the TTL override for a tagged record in a zone owned by this configuration."""
+    if "ttl" not in attrs:
+        return
+    instance = model.objects.filter(
+        name=record.name,
+        zone__name=record.zone,
+        zone__dns_view__name=record.view,
+        tags=record.adapter.sync_tag,
+        **record.adapter.dns_record_owner_filter,
+        **identity,
+    ).first()
+    if instance is not None and instance._ttl != attrs["ttl"]:
+        instance._ttl = attrs["ttl"]
+        instance.save(update_fields=["_ttl"])
+
+
 class DnsARecord(base.DnsARecord):
     """Nautobot ORM-backed DNS A record model.
 
@@ -348,6 +365,20 @@ class DnsARecord(base.DnsARecord):
                 dns_name=ids["name"]
             )
         return super().create(adapter, ids, attrs)
+
+    def update(self, attrs):
+        """Persist changes to the DNS record's TTL override."""
+        if validate_dns_models_installed():
+            from nautobot_dns_models.models import ARecord  # pylint: disable=import-outside-toplevel
+
+            _update_dns_record_ttl(
+                ARecord,
+                self,
+                attrs,
+                ip_address__host=self.address,
+                ip_address__parent__namespace_id=self.adapter.namespace_id,
+            )
+        return super().update(attrs)
 
     def delete(self):
         """Delete an ARecord, or no-op the `dns_name` fallback (handled by safe-delete of the IPAddress itself)."""
@@ -404,6 +435,20 @@ class DnsAaaaRecord(base.DnsAaaaRecord):
             )
         return super().create(adapter, ids, attrs)
 
+    def update(self, attrs):
+        """Persist changes to the DNS record's TTL override."""
+        if validate_dns_models_installed():
+            from nautobot_dns_models.models import AAAARecord  # pylint: disable=import-outside-toplevel
+
+            _update_dns_record_ttl(
+                AAAARecord,
+                self,
+                attrs,
+                ip_address__host=self.address,
+                ip_address__parent__namespace_id=self.adapter.namespace_id,
+            )
+        return super().update(attrs)
+
     def delete(self):
         """Delete an AAAARecord, or no-op the `dns_name` fallback."""
         if validate_dns_models_installed():
@@ -455,6 +500,14 @@ class DnsCnameRecord(base.DnsCnameRecord):
             )
         return super().create(adapter, ids, attrs)
 
+    def update(self, attrs):
+        """Persist changes to the DNS record's TTL override."""
+        if validate_dns_models_installed():
+            from nautobot_dns_models.models import CNAMERecord  # pylint: disable=import-outside-toplevel
+
+            _update_dns_record_ttl(CNAMERecord, self, attrs, alias=self.alias)
+        return super().update(attrs)
+
     def delete(self):
         """Delete a CNAMERecord, if `nautobot-dns-models` is installed."""
         if validate_dns_models_installed():
@@ -499,6 +552,14 @@ class DnsPtrRecord(base.DnsPtrRecord):
                 "nautobot-dns-models not installed; skipping PTR record %s (no-op in fallback mode).", ids["name"]
             )
         return super().create(adapter, ids, attrs)
+
+    def update(self, attrs):
+        """Persist changes to the DNS record's TTL override."""
+        if validate_dns_models_installed():
+            from nautobot_dns_models.models import PTRRecord  # pylint: disable=import-outside-toplevel
+
+            _update_dns_record_ttl(PTRRecord, self, attrs, ptrdname=self.ptrdname)
+        return super().update(attrs)
 
     def delete(self):
         """Delete a PTRRecord, if `nautobot-dns-models` is installed."""

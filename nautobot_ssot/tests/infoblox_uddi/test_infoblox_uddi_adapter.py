@@ -71,6 +71,21 @@ class InfobloxUDDIAdapterTestCase(unittest.TestCase):
         ipaddr = list(self.adapter.get_all("ipaddress"))[0]
         self.assertEqual(ipaddr.address, "10.0.0.5")
         self.assertEqual(ipaddr.prefix_length, 24)
+        self.conn.list_subnets.assert_called_once_with("ip_space/1")
+
+    def test_load_resolves_address_masks_with_prefix_import_disabled(self):
+        """Resolve IPv4 and IPv6 subnet masks without loading prefix objects."""
+        self.config.import_prefixes = False
+        self.conn.list_subnets.return_value.append(SimpleNamespace(address="2001:db8::", cidr=64))
+        self.conn.list_addresses.return_value.append(SimpleNamespace(address="2001:db8::5"))
+
+        self.adapter.load()
+
+        masks = {address.address: address.prefix_length for address in self.adapter.get_all("ipaddress")}
+        self.assertEqual(masks, {"10.0.0.5": 24, "2001:db8::5": 64})
+        self.assertEqual(list(self.adapter.get_all("prefix")), [])
+        self.conn.list_address_blocks.assert_not_called()
+        self.conn.list_subnets.assert_called_once_with("ip_space/1")
 
     def test_load_ip_addresses_reads_dns_names_from_address_objects(self):
         """Validate DNS names are read from the SDK's attribute-based address objects."""
@@ -89,6 +104,7 @@ class InfobloxUDDIAdapterTestCase(unittest.TestCase):
 
     def test_load_ip_addresses_defaults_to_host_mask_without_subnet(self):
         """Validate IP Addresses default to a host mask when no containing Subnet was loaded."""
+        self.conn.list_subnets.return_value = []
         self.adapter.load_ip_addresses()
         ipaddr = list(self.adapter.get_all("ipaddress"))[0]
         self.assertEqual(ipaddr.prefix_length, 32)

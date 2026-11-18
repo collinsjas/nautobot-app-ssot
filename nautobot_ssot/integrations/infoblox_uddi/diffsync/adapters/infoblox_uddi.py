@@ -46,7 +46,7 @@ class InfobloxUDDIAdapter(DiffSync):
         self._ip_space_id = None
         self._view_names_by_id = None
         self._unresolved_view_zones = set()
-        self._subnet_networks = []
+        self._subnets = None
 
     def _get_ip_space_id(self) -> str:
         """Resolve and cache the configured IP Space's BloxOne id."""
@@ -77,6 +77,12 @@ class InfobloxUDDIAdapter(DiffSync):
             )
         return view_name
 
+    def _get_subnets(self):
+        """Fetch subnets once for prefix import and IP address mask resolution."""
+        if self._subnets is None:
+            self._subnets = self.conn.list_subnets(self._get_ip_space_id())
+        return self._subnets
+
     def load_prefixes(self):
         """Load Prefixes (AddressBlocks as containers, Subnets as networks) from BloxOne.
 
@@ -98,10 +104,8 @@ class InfobloxUDDIAdapter(DiffSync):
                 self.add(new_prefix)
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate prefix found: {new_prefix}.")
-        for subnet in self.conn.list_subnets(ip_space_id):
+        for subnet in self._get_subnets():
             network_str = f"{subnet.address}/{subnet.cidr}"
-            network = ipaddress.ip_network(network_str, strict=False)
-            self._subnet_networks.append(network)
             new_prefix = self.prefix(
                 network=network_str,
                 namespace=namespace,
@@ -113,13 +117,14 @@ class InfobloxUDDIAdapter(DiffSync):
             except ObjectAlreadyExists:
                 self.job.logger.warning(f"Duplicate prefix found: {new_prefix}.")
 
-    def _containing_prefix_length(self, address: str) -> int:
+    @staticmethod
+    def _containing_prefix_length(address: str, subnet_networks) -> int:
         """Return the prefix length of the loaded subnet containing `address`.
 
         Defaults to a host mask (/32 or /128) if no containing subnet was loaded.
         """
         host = ipaddress.ip_address(address)
-        for network in self._subnet_networks:
+        for network in subnet_networks:
             if host in network:
                 return network.prefixlen
         return host.max_prefixlen
@@ -128,6 +133,9 @@ class InfobloxUDDIAdapter(DiffSync):
         """Load IP Addresses from BloxOne."""
         ip_space_id = self._get_ip_space_id()
         namespace = self.config.default_namespace.name
+        subnet_networks = [
+            ipaddress.ip_network(f"{subnet.address}/{subnet.cidr}", strict=False) for subnet in self._get_subnets()
+        ]
         for address in self.conn.list_addresses(ip_space_id):
             name = ""
             names = getattr(address, "names", None)
@@ -140,7 +148,7 @@ class InfobloxUDDIAdapter(DiffSync):
                         break
             new_ipaddress = self.ipaddress(
                 address=address.address,
-                prefix_length=self._containing_prefix_length(address.address),
+                prefix_length=self._containing_prefix_length(address.address, subnet_networks),
                 namespace=namespace,
                 description=getattr(address, "comment", None),
                 dns_name=name,
